@@ -1,0 +1,45 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+.env.local
+.env.*.local
+
+# --- Node / Vite ---
+node_modules/
+dist/
+*.local
+
+# --- SQLite ---
+backend/jobs.db
+backend/jobs.db-shm
+backend/jobs.db-wal
+
+# --- Runtime outputs (per-job folders) ---
+outputs/
+
+# --- Logs ---
+backend/logs/
+backend/uvicorn*.log*
+*.log
+
+# --- Bundled binaries / weights (large, downloaded by setup, not source) ---
+backend/poppler/
+backend/llamacpp/
+backend/fonts/
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# --- Pytest / coverage ---
+.pytest_cache/
+.coverage
+htmlcov/

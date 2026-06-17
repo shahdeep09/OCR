@@ -1,0 +1,357 @@
+"""BookScan FastAPI entrypoint."""
+from __future__ import annotations
+
+import config  # noqa: F401  — must come first; sets env vars before torch/surya imports
+config.init_env()
+config.init_logging()
+
+import asyncio
+import json
+import logging
+import shutil
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response
+
+import db
+import ocr_engine
+import pdf_utils
+import worker
+from schemas import PageOut, PageUpdate, UploadItem
+
+log = logging.getLogger("bookscan")
+
+# Tracks the eager model-load future so /api/health can report readiness.
+_model_load_future: asyncio.Future | None = None
+
+
+def _on_models_loaded(fut: asyncio.Future) -> None:
+    try:
+        fut.result()
+        log.info("Model load complete.")
+    except Exception as e:
+        log.error("Model load FAILED: %s", e, exc_info=True)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _model_load_future
+    db.init()
+    db.reset_running_to_failed()
+    worker.OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    loop = asyncio.get_running_loop()
+    _model_load_future = loop.run_in_executor(None, ocr_engine.load_models)
+    _model_load_future.add_done_callback(_on_models_loaded)
+
+    task = asyncio.create_task(worker.worker_loop())
+    await worker.resume_queued_jobs()
+    try:
+        yield
+    finally:
+        task.cancel()
+
+
+app = FastAPI(title="BookScan", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.ALLOWED_ORIGINS,
+    allow_origin_regex=config.ALLOWED_ORIGIN_REGEX,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ---------- Upload ----------
+
+@app.post("/api/upload", response_model=list[UploadItem])
+async def upload(files: list[UploadFile] = File(...)) -> list[UploadItem]:
+    if not files:
+        raise HTTPException(400, "No files provided")
+    if len(files) > config.MAX_UPLOAD:
+        raise HTTPException(400, f"Upload at most {config.MAX_UPLOAD} PDFs at once")
+
+    created: list[UploadItem] = []
+    for f in files:
+        if not (f.filename or "").lower().endswith(".pdf"):
+            raise HTTPException(400, f"Not a PDF: {f.filename}")
+        job_id = uuid.uuid4().hex
+        jdir = worker.job_dir(job_id)
+        jdir.mkdir(parents=True, exist_ok=True)
+        dest = jdir / "source.pdf"
+        with dest.open("wb") as out:
+            shutil.copyfileobj(f.file, out)
+        db.create_job(job_id, f.filename, ocr_engine.DEFAULT_LANGS)
+        await worker.enqueue(job_id)
+        created.append(UploadItem(job_id=job_id, filename=f.filename))
+        await worker.broadcast_jobs()
+    return created
+
+
+# ---------- Jobs ----------
+
+@app.get("/api/jobs")
+def list_jobs():
+    return db.list_jobs()
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job(job_id: str):
+    j = db.get_job(job_id)
+    if not j:
+        raise HTTPException(404, "Job not found")
+    return j
+
+
+@app.get("/api/jobs/{job_id}/error")
+def get_job_error(job_id: str):
+    j = db.get_job(job_id)
+    if not j:
+        raise HTTPException(404, "Job not found")
+    return {"error": j.get("error") or ""}
+
+
+@app.delete("/api/jobs/{job_id}")
+async def delete_job(job_id: str):
+    j = db.get_job(job_id)
+    if not j:
+        raise HTTPException(404, "Job not found")
+    db.delete_job(job_id)
+    jdir = worker.job_dir(job_id)
+    if jdir.exists():
+        shutil.rmtree(jdir, ignore_errors=True)
+    await worker.broadcast_jobs()
+    return {"ok": True}
+
+
+# ---------- Pages ----------
+
+@app.get("/api/jobs/{job_id}/pages", response_model=list[PageOut])
+def get_pages(job_id: str):
+    if not db.get_job(job_id):
+        raise HTTPException(404, "Job not found")
+    return db.list_pages(job_id)
+
+
+@app.get("/api/jobs/{job_id}/pages/{page_num}/image")
+def get_page_image(job_id: str, page_num: int):
+    img_path = pdf_utils.page_image_path(worker.job_dir(job_id), page_num)
+    if not img_path.exists():
+        raise HTTPException(404, "Page image not found")
+    return FileResponse(img_path, media_type="image/png")
+
+
+@app.put("/api/jobs/{job_id}/pages/{page_num}")
+def update_page(job_id: str, page_num: int, payload: PageUpdate):
+    ok = db.update_page_text(job_id, page_num, payload.text)
+    if not ok:
+        raise HTTPException(404, "Page not found")
+    cached = worker.job_dir(job_id) / "searchable.pdf"
+    if cached.exists():
+        cached.unlink(missing_ok=True)
+    return {"ok": True}
+
+
+# ---------- Downloads ----------
+
+def _require_done(job_id: str):
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if job["status"] != "done":
+        raise HTTPException(400, f"Job not finished (status={job['status']})")
+    return job
+
+
+@app.get("/api/jobs/{job_id}/download/json")
+def download_json(job_id: str):
+    job = _require_done(job_id)
+    pages = db.list_pages_with_bboxes(job_id)
+    page_objs = []
+    for p in pages:
+        block_texts = [
+            (b.get("text") or "").strip()
+            for b in (p.get("bboxes") or [])
+            if (b.get("text") or "").strip()
+        ]
+        if not block_texts:
+            block_texts = [
+                ln for ln in (p.get("text") or "").splitlines() if ln.strip()
+            ]
+        page_objs.append(
+            {
+                "page": p["page_num"],
+                "text": p["text"],
+                "lines": block_texts,
+            }
+        )
+    envelope = {
+        "book": job["filename"],
+        "total_pages": job["total_pages"],
+        "processed_at": job.get("completed_at") or job.get("created_at"),
+        "pages": page_objs,
+    }
+    data = json.dumps(envelope, ensure_ascii=False, indent=2).encode("utf-8")
+    fname = Path(job["filename"]).stem + ".json"
+    return Response(
+        content=data,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.get("/api/jobs/{job_id}/download/txt")
+def download_txt(job_id: str):
+    job = _require_done(job_id)
+    pages = db.list_pages(job_id)
+    parts: list[str] = []
+    for p in pages:
+        parts.append(f"--- Page {p['page_num']} ---\n\n{p['text']}\n")
+    data = "\n".join(parts).encode("utf-8")
+    fname = Path(job["filename"]).stem + ".txt"
+    return Response(
+        content=data,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
+@app.get("/api/jobs/{job_id}/download/pdf")
+def download_pdf(job_id: str):
+    job = _require_done(job_id)
+    jdir = worker.job_dir(job_id)
+    out = jdir / "searchable.pdf"
+    if not out.exists():
+        pages = db.list_pages_with_bboxes(job_id)
+        pdf_utils.build_searchable_pdf(jdir / "source.pdf", pages, out)
+    fname = Path(job["filename"]).stem + ".searchable.pdf"
+    return FileResponse(out, media_type="application/pdf", filename=fname)
+
+
+# ---------- WebSockets ----------
+
+@app.websocket("/api/ws/progress/{job_id}")
+async def ws_progress(ws: WebSocket, job_id: str):
+    await ws.accept()
+    await worker.subscribe(job_id, ws)
+    try:
+        j = db.get_job(job_id)
+        if j:
+            await ws.send_text(json.dumps({
+                "status": j["status"],
+                "processed_pages": j["processed_pages"],
+                "total_pages": j["total_pages"],
+                "error": j["error"],
+            }))
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        await worker.unsubscribe(job_id, ws)
+
+
+@app.websocket("/api/ws/jobs")
+async def ws_jobs(ws: WebSocket):
+    """Live job-list updates. Pushes the full list on connect and after every
+    create / status change / delete. Frontend falls back to polling if this
+    drops."""
+    await ws.accept()
+    await worker.subscribe_jobs(ws)
+    try:
+        await ws.send_text(json.dumps({"type": "jobs", "jobs": db.list_jobs()}))
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        await worker.unsubscribe_jobs(ws)
+
+
+# ---------- Health ----------
+
+@app.get("/api/health")
+def health():
+    models_ready = bool(_model_load_future and _model_load_future.done()
+                        and _model_load_future.exception() is None)
+    model_error = None
+    if _model_load_future and _model_load_future.done():
+        exc = _model_load_future.exception()
+        if exc is not None:
+            model_error = str(exc)
+    return {"ok": True, "models_ready": models_ready, "model_error": model_error}
+
+
+# ---------- Spec-named URL aliases (deployment spec) ----------
+# These delegate to the existing /api/* handlers so the canonical routes keep
+# working and any external caller using the spec URLs (curl examples, RunPod
+# clients) gets the same behavior.
+
+@app.post("/upload", response_model=list[UploadItem])
+async def upload_alias(files: list[UploadFile] = File(...)) -> list[UploadItem]:
+    return await upload(files)
+
+
+@app.get("/jobs")
+def jobs_alias():
+    return list_jobs()
+
+
+@app.get("/jobs/{job_id}")
+def job_alias(job_id: str):
+    return get_job(job_id)
+
+
+@app.delete("/jobs/{job_id}")
+async def delete_alias(job_id: str):
+    return await delete_job(job_id)
+
+
+@app.get("/jobs/{job_id}/error")
+def job_error_alias(job_id: str):
+    return get_job_error(job_id)
+
+
+@app.get("/pages/{job_id}/{page_num}")
+def page_image_alias(job_id: str, page_num: int):
+    return get_page_image(job_id, page_num)
+
+
+@app.put("/pages/{job_id}/{page_num}")
+def page_update_alias(job_id: str, page_num: int, payload: PageUpdate):
+    return update_page(job_id, page_num, payload)
+
+
+@app.get("/download/{job_id}/json")
+def download_json_alias(job_id: str):
+    return download_json(job_id)
+
+
+@app.get("/download/{job_id}/txt")
+def download_txt_alias(job_id: str):
+    return download_txt(job_id)
+
+
+@app.get("/download/{job_id}/pdf")
+def download_pdf_alias(job_id: str):
+    return download_pdf(job_id)
+
+
+@app.websocket("/ws/{job_id}")
+async def ws_progress_alias(ws: WebSocket, job_id: str):
+    await ws_progress(ws, job_id)
+
+
+@app.get("/health")
+def health_alias():
+    return health()
