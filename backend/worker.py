@@ -1,9 +1,16 @@
-"""Sequential job worker + WebSocket progress fan-out."""
+"""Per-job page-pipelined worker + WebSocket progress fan-out.
+
+Jobs are still processed strictly one at a time (single-PDF queue), but pages
+within a job are pipelined through ``PARALLEL_PAGES`` concurrent worker
+coroutines. This matches Surya's llama-server ``--parallel 8`` default, so the
+GPU is kept fed instead of idling between sequential page calls.
+"""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+import os
 import traceback
 from pathlib import Path
 from typing import Any
@@ -17,6 +24,11 @@ import pdf_utils
 log = logging.getLogger("bookscan.worker")
 
 OUTPUTS_DIR = Path(__file__).parent.parent / "outputs"
+
+# How many pages to process concurrently per job. Should match the number of
+# parallel slots that llama-server is started with (Surya's default is 8).
+# Override with the env var BOOKSCAN_PARALLEL_PAGES if needed.
+PARALLEL_PAGES = max(1, int(os.environ.get("BOOKSCAN_PARALLEL_PAGES", "8")))
 
 _queue: asyncio.Queue[str] = asyncio.Queue()
 
@@ -126,27 +138,59 @@ async def _process_job(job_id: str) -> None:
 
         langs = [s for s in (job["languages"] or "").split(",") if s] or ocr_engine.DEFAULT_LANGS
 
-        loop = asyncio.get_running_loop()
-
-        for page_num in range(1, total + 1):
-            img_path = pdf_utils.page_image_path(jdir, page_num)
-            img = await loop.run_in_executor(
-                None, pdf_utils.render_page, source_pdf, page_num, img_path
-            )
-            result = await loop.run_in_executor(None, ocr_engine.run_page, img, langs)
-
-            db.upsert_page(job_id, page_num, result["text"], result["lines"])
-            processed = db.bump_processed(job_id)
-            await _broadcast(
-                job_id,
-                {
-                    "status": "running",
-                    "processed_pages": processed,
-                    "total_pages": total,
-                    "page_just_done": page_num,
-                },
-            )
+        if total == 0:
+            db.set_status(job_id, "done")
+            await _broadcast(job_id, {"status": "done", "processed_pages": 0, "total_pages": 0})
             await broadcast_jobs()
+            return
+
+        loop = asyncio.get_running_loop()
+        sem = asyncio.Semaphore(PARALLEL_PAGES)
+
+        log.info(
+            "Job %s: pipelining %d page(s), up to %d in flight at once",
+            job_id, total, PARALLEL_PAGES,
+        )
+
+        async def process_one(page_num: int) -> tuple[int, dict[str, Any]]:
+            async with sem:
+                img_path = pdf_utils.page_image_path(jdir, page_num)
+                img = await loop.run_in_executor(
+                    None, pdf_utils.render_page, source_pdf, page_num, img_path
+                )
+                result = await loop.run_in_executor(
+                    None, ocr_engine.run_page, img, langs
+                )
+                return page_num, result
+
+        tasks = [
+            asyncio.create_task(process_one(p), name=f"job-{job_id[:8]}-page-{p}")
+            for p in range(1, total + 1)
+        ]
+
+        try:
+            for fut in asyncio.as_completed(tasks):
+                page_num, result = await fut
+                db.upsert_page(job_id, page_num, result["text"], result["lines"])
+                processed = db.bump_processed(job_id)
+                await _broadcast(
+                    job_id,
+                    {
+                        "status": "running",
+                        "processed_pages": processed,
+                        "total_pages": total,
+                        "page_just_done": page_num,
+                    },
+                )
+                await broadcast_jobs()
+        except BaseException:
+            # Any failure: cancel the remaining page tasks so they don't keep
+            # burning GPU time while the job is already marked failed.
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
 
         db.set_status(job_id, "done")
         await _broadcast(
@@ -157,14 +201,13 @@ async def _process_job(job_id: str) -> None:
     except Exception as e:
         tb = traceback.format_exc()
         log.error("Job %s failed: %s\n%s", job_id, e, tb)
-        # Store full traceback so the frontend can show it.
         db.set_status(job_id, "failed", f"{e}\n\n{tb}")
         await _broadcast(job_id, {"status": "failed", "error": str(e)})
         await broadcast_jobs()
 
 
 async def worker_loop() -> None:
-    log.info("Worker loop started")
+    log.info("Worker loop started (parallel pages = %d)", PARALLEL_PAGES)
     while True:
         job_id = await _queue.get()
         try:
