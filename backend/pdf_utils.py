@@ -19,7 +19,15 @@ BACKEND_DIR = Path(__file__).parent
 BUNDLED_POPPLER_BIN = BACKEND_DIR / "poppler" / "bin"
 FONT_DIR = BACKEND_DIR / "fonts"
 
-RENDER_DPI = 300
+# 200 DPI is a sweet spot for vision-language OCR: a US-letter page becomes
+# ~1700 x 2200 px which sits at the ideal input size for Surya's encoder.
+# Higher DPIs (300+) waste GPU time on detail the model down-tokenizes anyway.
+RENDER_DPI = 200
+
+# Hard cap on image width before OCR. Unusually large input PDFs (legal/A3 or
+# very high-DPI source) still get downscaled to this size to keep inference
+# time bounded. Mirrored in ocr_engine.MAX_IMAGE_WIDTH for belt-and-suspenders.
+MAX_IMAGE_WIDTH = 1800
 
 # Font registration is idempotent and lazy.
 _FONTS_REGISTERED = False
@@ -95,6 +103,10 @@ def render_page(pdf_path: Path, page_num: int, out_path: Path) -> Image.Image:
     if not images:
         raise RuntimeError(f"Failed to render page {page_num} of {pdf_path}")
     img = images[0]
+    if img.width > MAX_IMAGE_WIDTH:
+        ratio = MAX_IMAGE_WIDTH / img.width
+        new_size = (MAX_IMAGE_WIDTH, int(img.height * ratio))
+        img = img.resize(new_size, Image.LANCZOS)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(out_path, format="PNG")
     return img

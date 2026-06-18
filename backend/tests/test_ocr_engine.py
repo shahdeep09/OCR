@@ -43,7 +43,7 @@ def test_build_call_new_signature(monkeypatch):
     def newsig(images, layout_results=None, *, full_page=None): pass
     _set_predictor_with_sig(monkeypatch, newsig)
     monkeypatch.setattr(ocr_engine, "_detection_predictor", "DET", raising=True)
-    args, kwargs = ocr_engine._build_call("IMG", ["hi", "en"])  # type: ignore[arg-type]
+    args, kwargs = ocr_engine._build_call_for_batch(["IMG"], [["hi", "en"]])  # type: ignore[arg-type]
     assert args == [["IMG"]]
     assert kwargs == {"full_page": True}  # no langs/det in new sig
 
@@ -52,7 +52,7 @@ def test_build_call_old_signature_with_langs_and_det(monkeypatch):
     def oldsig(images, langs=None, det_predictor=None): pass
     _set_predictor_with_sig(monkeypatch, oldsig)
     monkeypatch.setattr(ocr_engine, "_detection_predictor", "DET", raising=True)
-    args, kwargs = ocr_engine._build_call("IMG", ["hi"])  # type: ignore[arg-type]
+    args, kwargs = ocr_engine._build_call_for_batch(["IMG"], [["hi"]])  # type: ignore[arg-type]
     assert args == [["IMG"]]
     assert kwargs == {"langs": [["hi"]], "det_predictor": "DET"}
 
@@ -61,7 +61,7 @@ def test_build_call_skips_det_when_none(monkeypatch):
     def oldsig(images, langs=None, det_predictor=None): pass
     _set_predictor_with_sig(monkeypatch, oldsig)
     monkeypatch.setattr(ocr_engine, "_detection_predictor", None, raising=True)
-    args, kwargs = ocr_engine._build_call("IMG", ["en"])  # type: ignore[arg-type]
+    args, kwargs = ocr_engine._build_call_for_batch(["IMG"], [["en"]])  # type: ignore[arg-type]
     assert "det_predictor" not in kwargs
 
 
@@ -69,9 +69,21 @@ def test_build_call_task_names_variant(monkeypatch):
     def mid(images, task_names=None, det_predictor=None): pass
     _set_predictor_with_sig(monkeypatch, mid)
     monkeypatch.setattr(ocr_engine, "_detection_predictor", "DET", raising=True)
-    args, kwargs = ocr_engine._build_call("IMG", ["en"])  # type: ignore[arg-type]
+    args, kwargs = ocr_engine._build_call_for_batch(["IMG"], [["en"]])  # type: ignore[arg-type]
     assert kwargs["task_names"] == ["ocr_with_boxes"]
     assert kwargs["det_predictor"] == "DET"
+
+
+def test_build_call_batch_of_three(monkeypatch):
+    """New: batched calls pass multiple images and matching task_names."""
+    def mid(images, task_names=None, det_predictor=None): pass
+    _set_predictor_with_sig(monkeypatch, mid)
+    monkeypatch.setattr(ocr_engine, "_detection_predictor", "DET", raising=True)
+    imgs = ["A", "B", "C"]
+    langs = [["en"], ["hi"], ["gu"]]
+    args, kwargs = ocr_engine._build_call_for_batch(imgs, langs)  # type: ignore[arg-type]
+    assert args == [["A", "B", "C"]]
+    assert kwargs["task_names"] == ["ocr_with_boxes"] * 3
 
 
 # ---------- _extract_lines (response parsing) ----------
