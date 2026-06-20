@@ -130,6 +130,25 @@ async def delete_job(job_id: str):
     return {"ok": True}
 
 
+@app.post("/api/jobs/{job_id}/resume")
+async def resume_job(job_id: str):
+    """Re-enqueue an interrupted job. The worker skips pages already in the DB,
+    so only the unfinished pages get processed. Safe to call on failed jobs."""
+    j = db.get_job(job_id)
+    if not j:
+        raise HTTPException(404, "Job not found")
+    if j["status"] in ("running", "queued"):
+        return {"ok": True, "status": j["status"]}
+    # Invalidate any cached (partial) searchable PDF — resuming adds pages.
+    cached = worker.job_dir(job_id) / "searchable.pdf"
+    if cached.exists():
+        cached.unlink(missing_ok=True)
+    db.set_status(job_id, "queued", None)  # clears any stale error
+    await worker.enqueue(job_id)
+    await worker.broadcast_jobs()
+    return {"ok": True, "status": "queued"}
+
+
 # ---------- Pages ----------
 
 @app.get("/api/jobs/{job_id}/pages", response_model=list[PageOut])
@@ -160,18 +179,21 @@ def update_page(job_id: str, page_num: int, payload: PageUpdate):
 
 # ---------- Downloads ----------
 
-def _require_done(job_id: str):
+def _require_downloadable(job_id: str):
+    """Allow download if the job has at least one completed page, regardless of
+    status. Lets a failed/running job export the pages done so far (partial
+    results) — completed work is never stranded behind a 'done' gate."""
     job = db.get_job(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
-    if job["status"] != "done":
-        raise HTTPException(400, f"Job not finished (status={job['status']})")
+    if not db.list_pages(job_id):
+        raise HTTPException(400, "No pages processed yet")
     return job
 
 
 @app.get("/api/jobs/{job_id}/download/json")
 def download_json(job_id: str):
-    job = _require_done(job_id)
+    job = _require_downloadable(job_id)
     pages = db.list_pages_with_bboxes(job_id)
     page_objs = []
     for p in pages:
@@ -208,7 +230,7 @@ def download_json(job_id: str):
 
 @app.get("/api/jobs/{job_id}/download/txt")
 def download_txt(job_id: str):
-    job = _require_done(job_id)
+    job = _require_downloadable(job_id)
     pages = db.list_pages(job_id)
     parts: list[str] = []
     for p in pages:
@@ -224,7 +246,7 @@ def download_txt(job_id: str):
 
 @app.get("/api/jobs/{job_id}/download/pdf")
 def download_pdf(job_id: str):
-    job = _require_done(job_id)
+    job = _require_downloadable(job_id)
     jdir = worker.job_dir(job_id)
     out = jdir / "searchable.pdf"
     if not out.exists():
@@ -315,6 +337,11 @@ def job_alias(job_id: str):
 @app.delete("/jobs/{job_id}")
 async def delete_alias(job_id: str):
     return await delete_job(job_id)
+
+
+@app.post("/jobs/{job_id}/resume")
+async def resume_alias(job_id: str):
+    return await resume_job(job_id)
 
 
 @app.get("/jobs/{job_id}/error")

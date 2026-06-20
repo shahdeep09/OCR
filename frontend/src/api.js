@@ -25,6 +25,7 @@ export const api = {
   listJobs: () => jfetch('/api/jobs'),
   getJob: (id) => jfetch(`/api/jobs/${id}`),
   getJobError: (id) => jfetch(`/api/jobs/${id}/error`),
+  resumeJob: (id) => jfetch(`/api/jobs/${id}/resume`, { method: 'POST' }),
   deleteJob: (id) => jfetch(`/api/jobs/${id}`, { method: 'DELETE' }),
   getPages: (id) => jfetch(`/api/jobs/${id}/pages`),
   updatePage: (id, page, text) =>

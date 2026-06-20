@@ -92,6 +92,13 @@ def bump_processed(job_id: str) -> int:
         return int(row[0]) if row else 0
 
 
+def set_processed_pages(job_id: str, n: int) -> None:
+    """Set the processed-page count explicitly (used when resuming a job so the
+    count reflects pages already in the DB)."""
+    with _lock:
+        _db.execute("UPDATE jobs SET processed_pages=? WHERE id=?", (n, job_id))
+
+
 def upsert_page(job_id: str, page_num: int, text: str, bboxes: list[dict[str, Any]]) -> None:
     with _lock:
         _db.execute(

@@ -121,7 +121,7 @@ export default function App() {
       <main className="main">
         {!selectedJob && <div className="main-empty"><Uploader onUploaded={onUploaded} /></div>}
         {selectedJob && selectedJob.status === 'failed' && (
-          <div className="main-progress"><ErrorCard job={selectedJob} /></div>
+          <div className="main-progress"><ErrorCard job={selectedJob} onResume={refreshJobs} /></div>
         )}
         {selectedJob && selectedJob.status !== 'done' && selectedJob.status !== 'failed' && (
           <div className="main-progress">
