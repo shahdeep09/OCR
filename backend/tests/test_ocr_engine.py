@@ -86,6 +86,42 @@ def test_build_call_batch_of_three(monkeypatch):
     assert kwargs["task_names"] == ["ocr_with_boxes"] * 3
 
 
+# ---------- run_batch alignment guard ----------
+
+def _block(html, order=0):
+    return SimpleNamespace(reading_order=order, skipped=False, error=False,
+                           html=html, bbox=[0, 0, 1, 1], confidence=1.0)
+
+
+def _img(w=10, h=10):
+    from PIL import Image
+    return Image.new("RGB", (w, h))
+
+
+def test_run_batch_aligns_results_to_input_order(monkeypatch):
+    preds = [SimpleNamespace(blocks=[_block("<p>A</p>")]),
+             SimpleNamespace(blocks=[_block("<p>B</p>")])]
+    monkeypatch.setattr(ocr_engine, "_recognition_predictor", MagicMock(return_value=preds), raising=True)
+    monkeypatch.setattr(ocr_engine, "_detection_predictor", None, raising=True)
+    monkeypatch.setattr(ocr_engine, "_rec_params",
+                        dict(inspect.signature(lambda images, full_page=None: None).parameters),
+                        raising=True)
+    results = ocr_engine.run_batch([_img(), _img()], [["en"], ["en"]])
+    assert [r["text"] for r in results] == ["A", "B"]
+
+
+def test_run_batch_raises_on_count_mismatch(monkeypatch):
+    # Predictor returns 1 result for 2 images — must fail loudly, not drop a page.
+    monkeypatch.setattr(ocr_engine, "_recognition_predictor",
+                        MagicMock(return_value=[SimpleNamespace(blocks=[])]), raising=True)
+    monkeypatch.setattr(ocr_engine, "_detection_predictor", None, raising=True)
+    monkeypatch.setattr(ocr_engine, "_rec_params",
+                        dict(inspect.signature(lambda images, full_page=None: None).parameters),
+                        raising=True)
+    with pytest.raises(RuntimeError):
+        ocr_engine.run_batch([_img(), _img()], [["en"], ["en"]])
+
+
 # ---------- _extract_lines (response parsing) ----------
 
 def test_extract_lines_new_shape_blocks():

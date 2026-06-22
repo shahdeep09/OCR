@@ -179,38 +179,59 @@ async def _process_job(job_id: str) -> None:
         loop = asyncio.get_running_loop()
 
         async def render_one(page_num: int):
+            # A single un-renderable page (corrupt/oversized) must not kill the
+            # whole job or poison every resume. Return None on failure; that page
+            # is recorded with a marker so it counts as processed.
             img_path = pdf_utils.page_image_path(jdir, page_num)
-            img = await loop.run_in_executor(
-                None, pdf_utils.render_page, source_pdf, page_num, img_path
+            try:
+                img = await loop.run_in_executor(
+                    None, pdf_utils.render_page, source_pdf, page_num, img_path
+                )
+                return page_num, img
+            except Exception as e:
+                log.error("Job %s: render failed for page %d: %s", job_id, page_num, e)
+                return page_num, None
+
+        async def save_page(page_num: int, text: str, lines: list) -> None:
+            db.upsert_page(job_id, page_num, text, lines)
+            processed = db.bump_processed(job_id)
+            await _broadcast(
+                job_id,
+                {"status": "running", "processed_pages": processed, "total_pages": total},
             )
-            return page_num, img
 
         # Process the remaining pages in batches of BATCH_SIZE. Each batch:
-        # render its pages (concurrently), OCR all of them in ONE Surya call
-        # (8 images -> 8 llama slots), then persist + broadcast per page. A
-        # crash loses at most the current batch; everything before it is saved.
+        # render its pages (concurrently), OCR the ones that rendered in ONE
+        # Surya call (8 images -> 8 llama slots), then persist + broadcast per
+        # page. A crash loses at most the current batch; prior batches are saved.
         for start in range(0, len(todo), BATCH_SIZE):
             batch_nums = todo[start:start + BATCH_SIZE]
             rendered = await asyncio.gather(*[render_one(p) for p in batch_nums])
-            page_nums = [pn for pn, _ in rendered]
-            images = [img for _, img in rendered]
 
-            results = await loop.run_in_executor(
-                None, ocr_engine.run_batch, images, [langs] * len(images)
-            )
+            ok = [(pn, img) for pn, img in rendered if img is not None]
+            failed = [pn for pn, img in rendered if img is None]
 
-            for page_num, result in zip(page_nums, results):
-                db.upsert_page(job_id, page_num, result["text"], result["lines"])
-                processed = db.bump_processed(job_id)
-                await _broadcast(
-                    job_id,
-                    {
-                        "status": "running",
-                        "processed_pages": processed,
-                        "total_pages": total,
-                    },
+            if ok:
+                ok_nums = [pn for pn, _ in ok]
+                images = [img for _, img in ok]
+                results = await loop.run_in_executor(
+                    None, ocr_engine.run_batch, images, [langs] * len(images)
                 )
+                for page_num, result in zip(ok_nums, results):
+                    await save_page(page_num, result["text"], result["lines"])
+
+            # Record un-renderable pages so they're counted and not retried forever.
+            for page_num in failed:
+                await save_page(page_num, "[page could not be rendered]", [])
+
             await broadcast_jobs()
+
+        # Completeness guard: never report "done" with pages missing from the DB.
+        final_done = len(db.list_pages(job_id))
+        if final_done < total:
+            raise RuntimeError(
+                f"Only {final_done}/{total} pages saved — marking failed so it can be resumed"
+            )
 
         db.set_status(job_id, "done")
         await _broadcast(

@@ -210,10 +210,14 @@ def run_batch(
                 pred = _recognition_predictor([img])
             predictions.extend(pred)
 
+    # Correctness guard: results must line up 1:1 with the input images (the
+    # caller maps results back to page numbers positionally). A mismatch would
+    # silently misalign or drop pages, so fail loudly — the job is then
+    # resumable and only the affected pages get retried.
     if len(predictions) != len(sized):
-        log.warning(
-            "Predictor returned %d results for %d images; padding with empties",
-            len(predictions), len(sized),
+        raise RuntimeError(
+            f"OCR returned {len(predictions)} results for {len(sized)} images "
+            f"— batch alignment failure"
         )
 
     results: list[dict[str, Any]] = []
