@@ -39,6 +39,14 @@ OUTPUTS_DIR = Path(__file__).parent.parent / "outputs"
 # via BOOKSCAN_BATCH_SIZE.
 BATCH_SIZE = max(1, int(os.environ.get("BOOKSCAN_BATCH_SIZE", "8")))
 
+# Watchdog timeouts. Surya already detects decoder loops and falls back to
+# block-mode OCR per page; these are the last-resort guards so a single
+# pathological page can never hang the whole job. On a whole-batch timeout we
+# retry the batch one page at a time to isolate the bad one; a page that still
+# times out is marked and skipped so the rest of the book completes.
+BATCH_TIMEOUT_S = int(os.environ.get("BOOKSCAN_BATCH_TIMEOUT", "600"))   # 10 min / batch
+PAGE_TIMEOUT_S = int(os.environ.get("BOOKSCAN_PAGE_TIMEOUT", "180"))     # 3 min / page
+
 
 _queue: asyncio.Queue[str] = asyncio.Queue()
 
@@ -200,10 +208,26 @@ async def _process_job(job_id: str) -> None:
                 {"status": "running", "processed_pages": processed, "total_pages": total},
             )
 
+        async def ocr_isolated(page_num: int, img):
+            """Last resort: OCR a single page with its own timeout. A page that
+            still won't finish (decoder stuck even after Surya's block fallback)
+            is marked and skipped so it can't hang the book."""
+            try:
+                res = await asyncio.wait_for(
+                    loop.run_in_executor(None, ocr_engine.run_batch, [img], [langs]),
+                    timeout=PAGE_TIMEOUT_S,
+                )
+                return page_num, res[0]["text"], res[0]["lines"]
+            except asyncio.TimeoutError:
+                log.error("Job %s: page %d OCR timed out (%ds) — marking, moving on",
+                          job_id, page_num, PAGE_TIMEOUT_S)
+                return page_num, "[OCR timed out — re-run this page]", []
+
         # Process the remaining pages in batches of BATCH_SIZE. Each batch:
-        # render its pages (concurrently), OCR the ones that rendered in ONE
-        # Surya call (8 images -> 8 llama slots), then persist + broadcast per
-        # page. A crash loses at most the current batch; prior batches are saved.
+        # render its pages (concurrently), OCR the rendered ones in ONE Surya
+        # call (8 images -> 8 llama slots). If the whole batch overruns its
+        # watchdog timeout, retry page-by-page to isolate the stuck one. A crash
+        # loses at most the current batch; prior batches are saved.
         for start in range(0, len(todo), BATCH_SIZE):
             batch_nums = todo[start:start + BATCH_SIZE]
             rendered = await asyncio.gather(*[render_one(p) for p in batch_nums])
@@ -214,11 +238,23 @@ async def _process_job(job_id: str) -> None:
             if ok:
                 ok_nums = [pn for pn, _ in ok]
                 images = [img for _, img in ok]
-                results = await loop.run_in_executor(
-                    None, ocr_engine.run_batch, images, [langs] * len(images)
-                )
-                for page_num, result in zip(ok_nums, results):
-                    await save_page(page_num, result["text"], result["lines"])
+                try:
+                    results = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None, ocr_engine.run_batch, images, [langs] * len(images)
+                        ),
+                        timeout=BATCH_TIMEOUT_S,
+                    )
+                    for page_num, result in zip(ok_nums, results):
+                        await save_page(page_num, result["text"], result["lines"])
+                except asyncio.TimeoutError:
+                    log.warning(
+                        "Job %s: batch (pages %s) exceeded %ds — isolating page-by-page",
+                        job_id, ok_nums, BATCH_TIMEOUT_S,
+                    )
+                    for page_num, img in ok:
+                        pn, text, lines = await ocr_isolated(page_num, img)
+                        await save_page(pn, text, lines)
 
             # Record un-renderable pages so they're counted and not retried forever.
             for page_num in failed:
