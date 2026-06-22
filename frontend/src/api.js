@@ -49,7 +49,9 @@ export const api = {
   // with per-chunk retry, reassemble server-side. Beats the proxy's big-request
   // limit and survives brief connection blips during upload.
   uploadLarge: async (file, onProgress) => {
-    const CHUNK = 8 * 1024 * 1024 // 8 MB
+    // 2 MB keeps each chunk well under the proxy's request timeout even on a
+    // slow upstream (~0.6 Mbps), so chunks complete instead of getting cut off.
+    const CHUNK = 2 * 1024 * 1024 // 2 MB
     const init = await jfetch('/api/upload/init', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

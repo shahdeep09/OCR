@@ -16,6 +16,7 @@ from pathlib import Path
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
+from starlette.requests import ClientDisconnect
 
 import db
 import ocr_engine
@@ -126,7 +127,12 @@ async def upload_chunk(upload_id: str, index: int, request: Request):
     d = UPLOAD_TMP / upload_id
     if not d.is_dir():
         raise HTTPException(404, "Unknown upload session")
-    data = await request.body()
+    try:
+        data = await request.body()
+    except ClientDisconnect:
+        # Connection dropped mid-chunk (slow link / proxy timeout). The browser
+        # retries this chunk, so just fail quietly without a scary traceback.
+        raise HTTPException(400, "Chunk interrupted; will retry")
     (d / f"{index:06d}.part").write_bytes(data)
     return {"ok": True, "bytes": len(data)}
 
