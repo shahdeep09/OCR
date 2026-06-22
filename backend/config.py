@@ -16,6 +16,11 @@ PROJECT_DIR = BACKEND_DIR.parent
 OUTPUTS_DIR = PROJECT_DIR / "outputs"
 LOGS_DIR = BACKEND_DIR / "logs"
 
+# Drop-folder for big PDFs that can't be uploaded through the browser/proxy.
+# Place a PDF here (via RunPod's file manager, Jupyter, scp, or wget) and ingest
+# it from the UI without a browser upload. Override with BOOKSCAN_INBOX_DIR.
+INBOX_DIR = Path(os.environ.get("BOOKSCAN_INBOX_DIR", str(PROJECT_DIR / "inbox")))
+
 BUNDLED_LLAMA = BACKEND_DIR / "llamacpp" / "llama-server.exe"
 
 MAX_UPLOAD = 5

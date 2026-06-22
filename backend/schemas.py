@@ -30,3 +30,12 @@ class UploadItem(BaseModel):
 
 class PageUpdate(BaseModel):
     text: str
+
+
+class IngestRequest(BaseModel):
+    filename: str
+
+
+class InboxItem(BaseModel):
+    filename: str
+    size_mb: float

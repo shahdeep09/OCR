@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 
 const MAX = 5
@@ -9,6 +9,21 @@ export default function Uploader({ onUploaded }) {
   const [dragging, setDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState('')
+
+  // Pod-side inbox (for big files that can't go through the browser/proxy)
+  const [inbox, setInbox] = useState([])
+  const [ingestingName, setIngestingName] = useState('')
+
+  const refreshInbox = async () => {
+    try {
+      const items = await api.getInbox()
+      setInbox(items || [])
+    } catch {
+      setInbox([])
+    }
+  }
+
+  useEffect(() => { refreshInbox() }, [])
 
   const handleFiles = (files) => {
     const arr = Array.from(files).filter((f) => f.name.toLowerCase().endsWith('.pdf'))
@@ -45,6 +60,22 @@ export default function Uploader({ onUploaded }) {
     }
   }
 
+  const ingest = async (filename) => {
+    setIngestingName(filename)
+    setError('')
+    try {
+      const created = await api.ingestFile(filename)
+      onUploaded([created])
+    } catch (e) {
+      setError(e.message || 'Ingest failed')
+    } finally {
+      setIngestingName('')
+    }
+  }
+
+  const totalMB = picked.reduce((s, f) => s + f.size, 0) / 1048576
+  const bigUpload = totalMB > 80
+
   return (
     <div className="card uploader">
       <h2>Upload PDFs</h2>
@@ -73,8 +104,16 @@ export default function Uploader({ onUploaded }) {
         <div className="picked">
           <strong>{picked.length} file{picked.length > 1 ? 's' : ''} ready:</strong>
           <ul>
-            {picked.map((f, i) => <li key={i}>{f.name}</li>)}
+            {picked.map((f, i) => (
+              <li key={i}>{f.name} <span className="hint">({(f.size / 1048576).toFixed(1)} MB)</span></li>
+            ))}
           </ul>
+          {bigUpload && (
+            <div className="warn-note">
+              ⚠ Large upload ({totalMB.toFixed(0)} MB). Big files can fail through the
+              proxy — if it does, use “Process a file already on the server” below.
+            </div>
+          )}
         </div>
       )}
 
@@ -90,6 +129,38 @@ export default function Uploader({ onUploaded }) {
         </button>
         {picked.length > 0 && (
           <button onClick={() => setPicked([])} disabled={uploading}>Clear</button>
+        )}
+      </div>
+
+      {/* Pod-side ingest — for files too big for a browser upload */}
+      <div className="inbox-section">
+        <div className="inbox-header">
+          <strong>Or process a file already on the server</strong>
+          <button className="link-btn" onClick={refreshInbox} title="Refresh list">↻</button>
+        </div>
+        <div className="hint" style={{ marginBottom: 8 }}>
+          For 50–200 MB books: drop the PDF into the server’s <code>inbox/</code> folder
+          (RunPod file manager / Jupyter / scp), then process it here — no upload needed.
+        </div>
+        {inbox.length === 0 && (
+          <div className="hint">No files in the server inbox.</div>
+        )}
+        {inbox.length > 0 && (
+          <ul className="inbox-list">
+            {inbox.map((it) => (
+              <li key={it.filename}>
+                <span className="inbox-name" title={it.filename}>{it.filename}</span>
+                <span className="hint">{it.size_mb} MB</span>
+                <button
+                  className="primary"
+                  disabled={!!ingestingName}
+                  onClick={() => ingest(it.filename)}
+                >
+                  {ingestingName === it.filename ? 'Starting…' : 'Process'}
+                </button>
+              </li>
+            ))}
+          </ul>
         )}
       </div>
     </div>

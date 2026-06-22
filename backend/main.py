@@ -21,7 +21,7 @@ import db
 import ocr_engine
 import pdf_utils
 import worker
-from schemas import PageOut, PageUpdate, UploadItem
+from schemas import IngestRequest, InboxItem, PageOut, PageUpdate, UploadItem
 
 log = logging.getLogger("bookscan")
 
@@ -92,6 +92,43 @@ async def upload(files: list[UploadFile] = File(...)) -> list[UploadItem]:
         created.append(UploadItem(job_id=job_id, filename=f.filename))
         await worker.broadcast_jobs()
     return created
+
+
+# ---------- Pod-side ingest (for big files that can't go through the proxy) ----------
+
+@app.get("/api/inbox", response_model=list[InboxItem])
+def list_inbox():
+    """List PDFs sitting in the inbox folder on the server (the pod's volume).
+    Drop big files there via RunPod's file manager / Jupyter / scp, then ingest
+    them without a browser upload."""
+    out: list[InboxItem] = []
+    if config.INBOX_DIR.exists():
+        for p in sorted(config.INBOX_DIR.glob("*.pdf")):
+            try:
+                out.append(InboxItem(filename=p.name, size_mb=round(p.stat().st_size / 1048576, 1)))
+            except OSError:
+                continue
+    return out
+
+
+@app.post("/api/ingest", response_model=UploadItem)
+async def ingest(payload: IngestRequest):
+    name = Path(payload.filename).name  # strip any path components
+    if not name.lower().endswith(".pdf"):
+        raise HTTPException(400, "Not a PDF")
+    src = (config.INBOX_DIR / name)
+    if not src.is_file() or src.resolve().parent != config.INBOX_DIR.resolve():
+        raise HTTPException(404, f"File not found in inbox: {name}")
+
+    job_id = uuid.uuid4().hex
+    jdir = worker.job_dir(job_id)
+    jdir.mkdir(parents=True, exist_ok=True)
+    dest = jdir / "source.pdf"
+    shutil.copyfile(src, dest)
+    db.create_job(job_id, name, ocr_engine.DEFAULT_LANGS)
+    await worker.enqueue(job_id)
+    await worker.broadcast_jobs()
+    return UploadItem(job_id=job_id, filename=name)
 
 
 # ---------- Jobs ----------
@@ -342,6 +379,16 @@ async def delete_alias(job_id: str):
 @app.post("/jobs/{job_id}/resume")
 async def resume_alias(job_id: str):
     return await resume_job(job_id)
+
+
+@app.get("/inbox")
+def inbox_alias():
+    return list_inbox()
+
+
+@app.post("/ingest", response_model=UploadItem)
+async def ingest_alias(payload: IngestRequest):
+    return await ingest(payload)
 
 
 @app.get("/jobs/{job_id}/error")

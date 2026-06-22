@@ -45,6 +45,13 @@ export const api = {
     }
     return r.json()
   },
+  getInbox: () => jfetch('/api/inbox'),
+  ingestFile: (filename) =>
+    jfetch('/api/ingest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename }),
+    }),
   pageImageUrl: (id, page) => `${API_BASE}/api/jobs/${id}/pages/${page}/image`,
   downloadUrl: (id, kind) => `${API_BASE}/api/jobs/${id}/download/${kind}`,
   wsProgress: (id) => new WebSocket(`${WS_BASE}/api/ws/progress/${id}`),

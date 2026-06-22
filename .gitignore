@@ -21,6 +21,9 @@ backend/jobs.db-wal
 # --- Runtime outputs (per-job folders) ---
 outputs/
 
+# --- Inbox drop-folder for big PDFs (pod-side ingest) ---
+inbox/
+
 # --- Logs ---
 backend/logs/
 backend/uvicorn*.log*
