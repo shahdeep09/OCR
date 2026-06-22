@@ -267,6 +267,16 @@ def get_pages(job_id: str):
     return db.list_pages(job_id)
 
 
+@app.get("/api/jobs/{job_id}/pages/{page_num}", response_model=PageOut)
+def get_page(job_id: str, page_num: int):
+    """Fresh single-page text — the viewer fetches per page so it never shows a
+    stale cached list."""
+    p = db.get_page(job_id, page_num)
+    if not p:
+        raise HTTPException(404, "Page not found")
+    return p
+
+
 @app.get("/api/jobs/{job_id}/pages/{page_num}/image")
 def get_page_image(job_id: str, page_num: int):
     img_path = pdf_utils.page_image_path(worker.job_dir(job_id), page_num)

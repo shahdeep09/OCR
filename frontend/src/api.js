@@ -28,6 +28,7 @@ export const api = {
   resumeJob: (id) => jfetch(`/api/jobs/${id}/resume`, { method: 'POST' }),
   deleteJob: (id) => jfetch(`/api/jobs/${id}`, { method: 'DELETE' }),
   getPages: (id) => jfetch(`/api/jobs/${id}/pages`),
+  getPage: (id, page) => jfetch(`/api/jobs/${id}/pages/${page}`),
   updatePage: (id, page, text) =>
     jfetch(`/api/jobs/${id}/pages/${page}`, {
       method: 'PUT',

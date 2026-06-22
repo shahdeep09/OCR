@@ -134,6 +134,15 @@ def list_jobs() -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def get_page(job_id: str, page_num: int) -> Optional[dict[str, Any]]:
+    with _lock:
+        row = _db.execute(
+            "SELECT page_num, text FROM pages WHERE job_id=? AND page_num=?",
+            (job_id, page_num),
+        ).fetchone()
+    return dict(row) if row else None
+
+
 def list_pages(job_id: str) -> list[dict[str, Any]]:
     with _lock:
         rows = _db.execute(

@@ -4,7 +4,6 @@ import PageNav from './PageNav.jsx'
 import DownloadBar from './DownloadBar.jsx'
 
 export default function Viewer({ job, onClose }) {
-  const [pages, setPages] = useState([]) // [{page_num, text}]
   const [pageNum, setPageNum] = useState(1)
   const [text, setText] = useState('')
   const [saveState, setSaveState] = useState('') // '', 'saving', 'saved', 'error'
@@ -12,30 +11,30 @@ export default function Viewer({ job, onClose }) {
   const lastSavedRef = useRef('')
   const textareaRef = useRef(null)
 
+  const total = job.total_pages || 0
+
+  // Reset to page 1 when the job changes
+  useEffect(() => { setPageNum(1) }, [job.id])
+
+  // Always fetch the current page's text fresh from the server — never a stale
+  // cached list. This is why JSON/TXT had text but the old viewer showed empty.
   useEffect(() => {
     let cancelled = false
-    setPages([])
-    setPageNum(1)
-    setText('')
-    api.getPages(job.id).then((list) => {
-      if (cancelled) return
-      setPages(list)
-      if (list.length > 0) {
-        setText(list[0].text || '')
-        lastSavedRef.current = list[0].text || ''
-      }
-    })
+    setSaveState('')
+    api.getPage(job.id, pageNum)
+      .then((p) => {
+        if (cancelled) return
+        const t = (p && p.text) || ''
+        setText(t)
+        lastSavedRef.current = t
+      })
+      .catch(() => {
+        if (cancelled) return
+        setText('')
+        lastSavedRef.current = ''
+      })
     return () => { cancelled = true }
-  }, [job.id])
-
-  useEffect(() => {
-    const p = pages.find((p) => p.page_num === pageNum)
-    if (p) {
-      setText(p.text || '')
-      lastSavedRef.current = p.text || ''
-      setSaveState('')
-    }
-  }, [pageNum, pages])
+  }, [job.id, pageNum])
 
   const saveNow = async (force = false) => {
     if (!force && text === lastSavedRef.current) return
@@ -43,7 +42,6 @@ export default function Viewer({ job, onClose }) {
     try {
       await api.updatePage(job.id, pageNum, text)
       lastSavedRef.current = text
-      setPages((prev) => prev.map((p) => p.page_num === pageNum ? { ...p, text } : p))
       setSaveState('saved')
       setTimeout(() => setSaveState((s) => s === 'saved' ? '' : s), 1200)
     } catch (e) {
@@ -59,7 +57,7 @@ export default function Viewer({ job, onClose }) {
     clearTimeout(saveTimer.current)
     saveTimer.current = setTimeout(() => saveNow(false), 500)
     return () => clearTimeout(saveTimer.current)
-  }, [text, pageNum, job.id])
+  }, [text])
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -90,14 +88,13 @@ export default function Viewer({ job, onClose }) {
         setPageNum((n) => Math.max(1, n - 1))
       } else if (e.key === 'ArrowRight') {
         e.preventDefault()
-        setPageNum((n) => Math.min(pages.length || job.total_pages, n + 1))
+        setPageNum((n) => Math.min(total, n + 1))
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [pages.length, job.total_pages, onClose, text, pageNum, job.id])
+  }, [total, onClose, text, pageNum, job.id])
 
-  const total = pages.length || job.total_pages
   const imgUrl = total > 0 ? api.pageImageUrl(job.id, pageNum) : null
 
   return (
