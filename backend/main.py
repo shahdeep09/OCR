@@ -13,7 +13,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
@@ -21,7 +21,18 @@ import db
 import ocr_engine
 import pdf_utils
 import worker
-from schemas import IngestRequest, InboxItem, PageOut, PageUpdate, UploadItem
+from schemas import (
+    IngestRequest,
+    InboxItem,
+    PageOut,
+    PageUpdate,
+    UploadFinish,
+    UploadInit,
+    UploadItem,
+)
+
+# Scratch dir for in-flight chunked uploads.
+UPLOAD_TMP = config.OUTPUTS_DIR / "_uploads"
 
 log = logging.getLogger("bookscan")
 
@@ -43,6 +54,8 @@ async def lifespan(app: FastAPI):
     db.init()
     db.reset_running_to_failed()
     worker.OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(UPLOAD_TMP, ignore_errors=True)  # drop any half-finished chunked uploads
+    config.INBOX_DIR.mkdir(parents=True, exist_ok=True)
 
     loop = asyncio.get_running_loop()
     _model_load_future = loop.run_in_executor(None, ocr_engine.load_models)
@@ -92,6 +105,59 @@ async def upload(files: list[UploadFile] = File(...)) -> list[UploadItem]:
         created.append(UploadItem(job_id=job_id, filename=f.filename))
         await worker.broadcast_jobs()
     return created
+
+
+# ---------- Chunked upload (reliable for big files through the proxy) ----------
+# The browser slices a file into small parts and uploads them one at a time;
+# the proxy handles small requests fine, and a dropped chunk just retries. The
+# parts are reassembled into source.pdf server-side, then the job is created.
+
+@app.post("/api/upload/init")
+def upload_init(payload: UploadInit):
+    if not payload.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Not a PDF")
+    upload_id = uuid.uuid4().hex
+    (UPLOAD_TMP / upload_id).mkdir(parents=True, exist_ok=True)
+    return {"upload_id": upload_id}
+
+
+@app.put("/api/upload/chunk/{upload_id}/{index}")
+async def upload_chunk(upload_id: str, index: int, request: Request):
+    d = UPLOAD_TMP / upload_id
+    if not d.is_dir():
+        raise HTTPException(404, "Unknown upload session")
+    data = await request.body()
+    (d / f"{index:06d}.part").write_bytes(data)
+    return {"ok": True, "bytes": len(data)}
+
+
+@app.post("/api/upload/finish/{upload_id}", response_model=UploadItem)
+async def upload_finish(upload_id: str, payload: UploadFinish):
+    d = UPLOAD_TMP / upload_id
+    if not d.is_dir():
+        raise HTTPException(404, "Unknown upload session")
+    parts = sorted(d.glob("*.part"))
+    if len(parts) != payload.total_chunks:
+        shutil.rmtree(d, ignore_errors=True)
+        raise HTTPException(
+            400, f"Incomplete upload: got {len(parts)} of {payload.total_chunks} chunks"
+        )
+
+    name = Path(payload.filename).name
+    job_id = uuid.uuid4().hex
+    jdir = worker.job_dir(job_id)
+    jdir.mkdir(parents=True, exist_ok=True)
+    dest = jdir / "source.pdf"
+    with dest.open("wb") as out:
+        for p in parts:
+            with p.open("rb") as src:
+                shutil.copyfileobj(src, out)
+    shutil.rmtree(d, ignore_errors=True)
+
+    db.create_job(job_id, name, ocr_engine.DEFAULT_LANGS)
+    await worker.enqueue(job_id)
+    await worker.broadcast_jobs()
+    return UploadItem(job_id=job_id, filename=name)
 
 
 # ---------- Pod-side ingest (for big files that can't go through the proxy) ----------

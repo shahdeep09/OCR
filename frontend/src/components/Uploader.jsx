@@ -8,6 +8,7 @@ export default function Uploader({ onUploaded }) {
   const [picked, setPicked] = useState([])
   const [dragging, setDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
+  const [progress, setProgress] = useState(null) // {name, idx, of, pct}
   const [error, setError] = useState('')
 
   // Pod-side inbox (for big files that can't go through the browser/proxy)
@@ -50,13 +51,22 @@ export default function Uploader({ onUploaded }) {
     setUploading(true)
     setError('')
     try {
-      const created = await api.upload(picked)
+      const created = []
+      for (let idx = 0; idx < picked.length; idx++) {
+        const f = picked[idx]
+        setProgress({ name: f.name, idx: idx + 1, of: picked.length, pct: 0 })
+        const item = await api.uploadLarge(f, (pct) =>
+          setProgress((p) => (p ? { ...p, pct } : p))
+        )
+        created.push(item)
+      }
       setPicked([])
       onUploaded(created)
     } catch (e) {
       setError(e.message || 'Upload failed')
     } finally {
       setUploading(false)
+      setProgress(null)
     }
   }
 
@@ -74,7 +84,6 @@ export default function Uploader({ onUploaded }) {
   }
 
   const totalMB = picked.reduce((s, f) => s + f.size, 0) / 1048576
-  const bigUpload = totalMB > 80
 
   return (
     <div className="card uploader">
@@ -108,16 +117,25 @@ export default function Uploader({ onUploaded }) {
               <li key={i}>{f.name} <span className="hint">({(f.size / 1048576).toFixed(1)} MB)</span></li>
             ))}
           </ul>
-          {bigUpload && (
-            <div className="warn-note">
-              ⚠ Large upload ({totalMB.toFixed(0)} MB). Big files can fail through the
-              proxy — if it does, use “Process a file already on the server” below.
-            </div>
-          )}
+          <div className="hint" style={{ marginTop: 6 }}>
+            Total {totalMB.toFixed(1)} MB · uploaded in chunks (any size works).
+          </div>
         </div>
       )}
 
       {error && <div className="error">{error}</div>}
+
+      {progress && (
+        <div className="upload-progress">
+          <div className="hint">
+            Uploading {progress.idx} of {progress.of}: {progress.name}
+          </div>
+          <div className="progress-bar">
+            <div className="progress-bar-fill" style={{ width: `${progress.pct}%` }} />
+          </div>
+          <div className="hint">{progress.pct}%</div>
+        </div>
+      )}
 
       <div style={{ marginTop: 18, display: 'flex', gap: 8, justifyContent: 'center' }}>
         <button

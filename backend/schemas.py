@@ -36,6 +36,15 @@ class IngestRequest(BaseModel):
     filename: str
 
 
+class UploadInit(BaseModel):
+    filename: str
+
+
+class UploadFinish(BaseModel):
+    filename: str
+    total_chunks: int
+
+
 class InboxItem(BaseModel):
     filename: str
     size_mb: float

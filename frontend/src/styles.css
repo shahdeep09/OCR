@@ -212,6 +212,22 @@ button.danger:hover { background: #fff5f5; }
   font-size: 12px;
   color: #975a16;
 }
+.upload-progress {
+  margin-top: 14px;
+  text-align: left;
+}
+.upload-progress .progress-bar {
+  height: 10px;
+  background: var(--surface-2);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 6px 0;
+}
+.upload-progress .progress-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 150ms;
+}
 .inbox-section {
   margin-top: 22px;
   padding-top: 18px;
