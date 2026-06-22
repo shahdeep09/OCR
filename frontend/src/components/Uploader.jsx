@@ -63,23 +63,21 @@ export default function Uploader({ onUploaded }) {
     setError('')
     const created = []
     const failed = []
-    const BIG = 50 * 1024 * 1024 // >50MB: the proxy drops single big POSTs
     for (let idx = 0; idx < picked.length; idx++) {
       const f = picked[idx]
       const onPct = (pct) => setProgress((p) => (p ? { ...p, pct } : p))
-      setProgress({ name: f.name, idx: idx + 1, of: picked.length, pct: 0, chunked: f.size > BIG })
+      setProgress({ name: f.name, idx: idx + 1, of: picked.length, pct: 0, chunked: false })
       try {
         let items
-        if (f.size > BIG) {
+        try {
+          // Fast path: one streaming request. Over a Direct TCP backend this
+          // works for any size; over the RunPod proxy it works up to ~70MB.
+          items = await api.uploadOne(f, onPct)
+        } catch (e1) {
+          // Single request failed (proxy dropped a big POST) — fall back to
+          // chunked so it still completes. No-op when on a Direct TCP backend.
+          setProgress((p) => (p ? { ...p, pct: 0, chunked: true } : p))
           items = await api.uploadChunked(f, onPct)
-        } else {
-          try {
-            items = await api.uploadOne(f, onPct)
-          } catch (e1) {
-            // Proxy dropped the single request — fall back to chunked.
-            setProgress((p) => (p ? { ...p, pct: 0, chunked: true } : p))
-            items = await api.uploadChunked(f, onPct)
-          }
         }
         created.push(...(items || []))
       } catch (e) {
