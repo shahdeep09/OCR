@@ -29,16 +29,27 @@ export default function Uploader({ onUploaded }) {
   const handleFiles = (files) => {
     const arr = Array.from(files).filter((f) => f.name.toLowerCase().endsWith('.pdf'))
     if (arr.length === 0) {
-      setError('Please drop PDF files.')
-      return
-    }
-    if (arr.length > MAX) {
-      setError(`Up to ${MAX} PDFs per upload.`)
+      setError('Please choose PDF files.')
       return
     }
     setError('')
-    setPicked(arr)
+    // Accumulate across multiple drops/picks (dedupe by name+size), cap at MAX.
+    setPicked((prev) => {
+      const combined = [...prev]
+      for (const f of arr) {
+        if (!combined.some((g) => g.name === f.name && g.size === f.size)) {
+          combined.push(f)
+        }
+      }
+      if (combined.length > MAX) {
+        setError(`Up to ${MAX} PDFs at a time — keeping the first ${MAX}.`)
+        return combined.slice(0, MAX)
+      }
+      return combined
+    })
   }
+
+  const removeFile = (i) => setPicked((prev) => prev.filter((_, idx) => idx !== i))
 
   const onDrop = (e) => {
     e.preventDefault()
@@ -50,23 +61,27 @@ export default function Uploader({ onUploaded }) {
     if (picked.length === 0) return
     setUploading(true)
     setError('')
-    try {
-      const created = []
-      for (let idx = 0; idx < picked.length; idx++) {
-        const f = picked[idx]
-        setProgress({ name: f.name, idx: idx + 1, of: picked.length, pct: 0 })
+    const created = []
+    const failed = []
+    for (let idx = 0; idx < picked.length; idx++) {
+      const f = picked[idx]
+      setProgress({ name: f.name, idx: idx + 1, of: picked.length, pct: 0 })
+      try {
         const items = await api.uploadOne(f, (pct) =>
           setProgress((p) => (p ? { ...p, pct } : p))
         )
         created.push(...(items || []))
+      } catch (e) {
+        // One bad file shouldn't abort the rest — record it and keep going.
+        failed.push(`${f.name}: ${e.message || 'failed'}`)
       }
+    }
+    setUploading(false)
+    setProgress(null)
+    if (failed.length) setError(`Failed — ${failed.join(' · ')}`)
+    if (created.length) {
       setPicked([])
       onUploaded(created)
-    } catch (e) {
-      setError(e.message || 'Upload failed')
-    } finally {
-      setUploading(false)
-      setProgress(null)
     }
   }
 
@@ -105,20 +120,25 @@ export default function Uploader({ onUploaded }) {
           accept="application/pdf"
           multiple
           style={{ display: 'none' }}
-          onChange={(e) => handleFiles(e.target.files)}
+          onChange={(e) => { handleFiles(e.target.files); e.target.value = '' }}
         />
       </div>
 
       {picked.length > 0 && (
         <div className="picked">
-          <strong>{picked.length} file{picked.length > 1 ? 's' : ''} ready:</strong>
+          <strong>{picked.length} of {MAX} file{picked.length > 1 ? 's' : ''} ready:</strong>
           <ul>
             {picked.map((f, i) => (
-              <li key={i}>{f.name} <span className="hint">({(f.size / 1048576).toFixed(1)} MB)</span></li>
+              <li key={i}>
+                {f.name} <span className="hint">({(f.size / 1048576).toFixed(1)} MB)</span>
+                {!uploading && (
+                  <button className="link-btn" title="Remove" onClick={() => removeFile(i)}>×</button>
+                )}
+              </li>
             ))}
           </ul>
           <div className="hint" style={{ marginTop: 6 }}>
-            Total {totalMB.toFixed(1)} MB
+            Total {totalMB.toFixed(1)} MB · they process one after another.
           </div>
         </div>
       )}
