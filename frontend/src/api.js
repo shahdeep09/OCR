@@ -72,6 +72,45 @@ export const api = {
       xhr.onerror = () => reject(new Error('Upload failed (network error)'))
       xhr.send(fd)
     }),
+  // Chunked upload for big files: RunPod's proxy drops request bodies past
+  // ~100 MB, so split into 2 MB pieces it accepts. Slower (per-chunk overhead)
+  // but reliable for any size. Each chunk retries on a blip. Returns [job].
+  uploadChunked: async (file, onProgress) => {
+    const CHUNK = 2 * 1024 * 1024
+    const init = await jfetch('/api/upload/init', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: file.name }),
+    })
+    const uploadId = init.upload_id
+    const total = Math.max(1, Math.ceil(file.size / CHUNK))
+    for (let i = 0; i < total; i++) {
+      const blob = file.slice(i * CHUNK, Math.min((i + 1) * CHUNK, file.size))
+      let done = false
+      let lastErr
+      for (let attempt = 0; attempt < 4 && !done; attempt++) {
+        try {
+          const r = await fetch(`${API_BASE}/api/upload/chunk/${uploadId}/${i}`, {
+            method: 'PUT',
+            body: blob,
+          })
+          if (!r.ok) throw new Error(`chunk ${i} failed (${r.status})`)
+          done = true
+        } catch (e) {
+          lastErr = e
+          await new Promise((res) => setTimeout(res, 800 * (attempt + 1)))
+        }
+      }
+      if (!done) throw lastErr || new Error(`chunk ${i} failed`)
+      if (onProgress) onProgress(Math.round(((i + 1) / total) * 100))
+    }
+    const item = await jfetch(`/api/upload/finish/${uploadId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: file.name, total_chunks: total }),
+    })
+    return [item]
+  },
   getInbox: () => jfetch('/api/inbox'),
   ingestFile: (filename) =>
     jfetch('/api/ingest', {

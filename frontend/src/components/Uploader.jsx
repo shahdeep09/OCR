@@ -63,13 +63,24 @@ export default function Uploader({ onUploaded }) {
     setError('')
     const created = []
     const failed = []
+    const BIG = 50 * 1024 * 1024 // >50MB: the proxy drops single big POSTs
     for (let idx = 0; idx < picked.length; idx++) {
       const f = picked[idx]
-      setProgress({ name: f.name, idx: idx + 1, of: picked.length, pct: 0 })
+      const onPct = (pct) => setProgress((p) => (p ? { ...p, pct } : p))
+      setProgress({ name: f.name, idx: idx + 1, of: picked.length, pct: 0, chunked: f.size > BIG })
       try {
-        const items = await api.uploadOne(f, (pct) =>
-          setProgress((p) => (p ? { ...p, pct } : p))
-        )
+        let items
+        if (f.size > BIG) {
+          items = await api.uploadChunked(f, onPct)
+        } else {
+          try {
+            items = await api.uploadOne(f, onPct)
+          } catch (e1) {
+            // Proxy dropped the single request — fall back to chunked.
+            setProgress((p) => (p ? { ...p, pct: 0, chunked: true } : p))
+            items = await api.uploadChunked(f, onPct)
+          }
+        }
         created.push(...(items || []))
       } catch (e) {
         // One bad file shouldn't abort the rest — record it and keep going.
@@ -149,6 +160,7 @@ export default function Uploader({ onUploaded }) {
         <div className="upload-progress">
           <div className="hint">
             Uploading {progress.idx} of {progress.of}: {progress.name}
+            {progress.chunked ? ' · large file (chunked, slower but reliable)' : ''}
           </div>
           <div className="progress-bar">
             <div className="progress-bar-fill" style={{ width: `${progress.pct}%` }} />
