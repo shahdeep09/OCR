@@ -15,6 +15,7 @@ class JobOut(BaseModel):
     languages: str
     error: Optional[str] = None
     created_at: str
+    started_at: Optional[str] = None
     completed_at: Optional[str] = None
 
 

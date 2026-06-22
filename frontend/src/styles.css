@@ -124,6 +124,16 @@ button.danger:hover { background: #fff5f5; }
   font-size: 12px;
   color: var(--text-muted);
 }
+.history-item .row3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+.history-item .row3 span:first-child { color: var(--accent); font-weight: 500; }
 .history-item .delete-btn {
   border: none;
   background: transparent;

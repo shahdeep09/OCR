@@ -37,6 +37,7 @@ def init() -> None:
                 languages TEXT NOT NULL DEFAULT 'hi,gu,en',
                 error TEXT,
                 created_at TEXT NOT NULL,
+                started_at TEXT,
                 completed_at TEXT
             );
             CREATE TABLE IF NOT EXISTS pages (
@@ -49,6 +50,10 @@ def init() -> None:
             );
             """
         )
+        # Migration: add started_at to jobs tables created before this column.
+        cols = [r[1] for r in _db.execute("PRAGMA table_info(jobs)").fetchall()]
+        if "started_at" not in cols:
+            _db.execute("ALTER TABLE jobs ADD COLUMN started_at TEXT")
 
 
 def now() -> str:
@@ -73,6 +78,13 @@ def set_status(job_id: str, status: str, error: Optional[str] = None) -> None:
         if status in ("done", "failed"):
             _db.execute(
                 "UPDATE jobs SET status=?, error=?, completed_at=? WHERE id=?",
+                (status, error, now(), job_id),
+            )
+        elif status == "running":
+            # Stamp started_at on the first transition to running only (COALESCE
+            # keeps the original start across a resume).
+            _db.execute(
+                "UPDATE jobs SET status=?, error=?, started_at=COALESCE(started_at, ?) WHERE id=?",
                 (status, error, now(), job_id),
             )
         else:
