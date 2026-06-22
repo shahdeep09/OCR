@@ -55,10 +55,10 @@ export default function Uploader({ onUploaded }) {
       for (let idx = 0; idx < picked.length; idx++) {
         const f = picked[idx]
         setProgress({ name: f.name, idx: idx + 1, of: picked.length, pct: 0 })
-        const item = await api.uploadLarge(f, (pct) =>
+        const items = await api.uploadOne(f, (pct) =>
           setProgress((p) => (p ? { ...p, pct } : p))
         )
-        created.push(item)
+        created.push(...(items || []))
       }
       setPicked([])
       onUploaded(created)
@@ -118,7 +118,7 @@ export default function Uploader({ onUploaded }) {
             ))}
           </ul>
           <div className="hint" style={{ marginTop: 6 }}>
-            Total {totalMB.toFixed(1)} MB · uploaded in chunks (any size works).
+            Total {totalMB.toFixed(1)} MB
           </div>
         </div>
       )}

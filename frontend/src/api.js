@@ -45,46 +45,32 @@ export const api = {
     }
     return r.json()
   },
-  // Reliable upload for any file size: slice into chunks, upload one at a time
-  // with per-chunk retry, reassemble server-side. Beats the proxy's big-request
-  // limit and survives brief connection blips during upload.
-  uploadLarge: async (file, onProgress) => {
-    // 2 MB keeps each chunk well under the proxy's request timeout even on a
-    // slow upstream (~0.6 Mbps), so chunks complete instead of getting cut off.
-    const CHUNK = 2 * 1024 * 1024 // 2 MB
-    const init = await jfetch('/api/upload/init', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: file.name }),
-    })
-    const uploadId = init.upload_id
-    const total = Math.max(1, Math.ceil(file.size / CHUNK))
-    for (let i = 0; i < total; i++) {
-      const blob = file.slice(i * CHUNK, Math.min((i + 1) * CHUNK, file.size))
-      let done = false
-      let lastErr
-      for (let attempt = 0; attempt < 4 && !done; attempt++) {
-        try {
-          const r = await fetch(`${API_BASE}/api/upload/chunk/${uploadId}/${i}`, {
-            method: 'PUT',
-            body: blob,
-          })
-          if (!r.ok) throw new Error(`chunk ${i} failed (${r.status})`)
-          done = true
-        } catch (e) {
-          lastErr = e
-          await new Promise((res) => setTimeout(res, 600 * (attempt + 1)))
+  // Single continuous upload of one file (the original mechanism), via XHR so we
+  // can show a progress bar. One streaming request is far faster through the
+  // RunPod proxy than many small chunked requests. Returns the created job list.
+  uploadOne: (file, onProgress) =>
+    new Promise((resolve, reject) => {
+      const fd = new FormData()
+      fd.append('files', file)
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `${API_BASE}/api/upload`)
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && onProgress) {
+          onProgress(Math.round((e.loaded / e.total) * 100))
         }
       }
-      if (!done) throw lastErr || new Error(`chunk ${i} failed`)
-      if (onProgress) onProgress(Math.round(((i + 1) / total) * 100))
-    }
-    return jfetch(`/api/upload/finish/${uploadId}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ filename: file.name, total_chunks: total }),
-    })
-  },
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)) } catch { resolve([]) }
+        } else {
+          let msg = `${xhr.status} ${xhr.statusText}`
+          try { const b = JSON.parse(xhr.responseText); if (b.detail) msg = b.detail } catch {}
+          reject(new Error(msg))
+        }
+      }
+      xhr.onerror = () => reject(new Error('Upload failed (network error)'))
+      xhr.send(fd)
+    }),
   getInbox: () => jfetch('/api/inbox'),
   ingestFile: (filename) =>
     jfetch('/api/ingest', {
