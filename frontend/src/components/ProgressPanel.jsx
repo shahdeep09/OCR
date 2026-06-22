@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 
 const MAX_BACKOFF_MS = 4000
+const MAX_WS_ATTEMPTS = 5
 
 export default function ProgressPanel({ job, onJobUpdate }) {
   const [snapshot, setSnapshot] = useState({
@@ -12,12 +13,27 @@ export default function ProgressPanel({ job, onJobUpdate }) {
   })
   const wsRef = useRef(null)
 
+  // Reliable path: keep progress fresh from the polled job prop. RunPod's proxy
+  // often refuses WebSocket upgrades, so the 3s polling in App is what actually
+  // drives the bar; the WS below is just a bonus when it does connect. Math.max
+  // avoids the bar jumping backward if a poll lands behind a WS update.
+  useEffect(() => {
+    setSnapshot((cur) => ({
+      status: job.status,
+      processed_pages: Math.max(cur.processed_pages || 0, job.processed_pages || 0),
+      total_pages: job.total_pages || cur.total_pages,
+      error: job.error,
+    }))
+  }, [job.status, job.processed_pages, job.total_pages, job.error])
+
   useEffect(() => {
     let cancelled = false
     let backoff = 250
+    let attempts = 0
 
     const connect = () => {
-      if (cancelled) return
+      if (cancelled || attempts >= MAX_WS_ATTEMPTS) return
+      attempts += 1
       let ws
       try {
         ws = api.wsProgress(job.id)
@@ -26,7 +42,7 @@ export default function ProgressPanel({ job, onJobUpdate }) {
         return
       }
       wsRef.current = ws
-      ws.onopen = () => { backoff = 250 }
+      ws.onopen = () => { backoff = 250; attempts = 0 }
       ws.onmessage = (ev) => {
         try {
           const msg = JSON.parse(ev.data)
@@ -45,7 +61,7 @@ export default function ProgressPanel({ job, onJobUpdate }) {
     }
 
     const scheduleReconnect = () => {
-      if (cancelled) return
+      if (cancelled || attempts >= MAX_WS_ATTEMPTS) return  // give up, polling covers it
       setTimeout(connect, backoff)
       backoff = Math.min(backoff * 2, MAX_BACKOFF_MS)
     }
