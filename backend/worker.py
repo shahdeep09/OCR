@@ -187,20 +187,6 @@ async def _process_job(job_id: str) -> None:
 
         loop = asyncio.get_running_loop()
 
-        async def render_one(page_num: int):
-            # A single un-renderable page (corrupt/oversized) must not kill the
-            # whole job or poison every resume. Return None on failure; that page
-            # is recorded with a marker so it counts as processed.
-            img_path = pdf_utils.page_image_path(jdir, page_num)
-            try:
-                img = await loop.run_in_executor(
-                    None, pdf_utils.render_page, source_pdf, page_num, img_path
-                )
-                return page_num, img
-            except Exception as e:
-                log.error("Job %s: render failed for page %d: %s", job_id, page_num, e)
-                return page_num, None
-
         async def save_page(page_num: int, text: str, lines: list) -> None:
             db.upsert_page(job_id, page_num, text, lines)
             processed = db.bump_processed(job_id)
@@ -225,16 +211,19 @@ async def _process_job(job_id: str) -> None:
                 return page_num, "[OCR timed out — re-run this page]", []
 
         # Process the remaining pages in batches of BATCH_SIZE. Each batch:
-        # render its pages (concurrently), OCR the rendered ones in ONE Surya
-        # call (8 images -> 8 llama slots). If the whole batch overruns its
-        # watchdog timeout, retry page-by-page to isolate the stuck one. A crash
-        # loses at most the current batch; prior batches are saved.
+        # render its pages in ONE pypdfium2 pass (opens the PDF once — far
+        # faster than pdf2image re-parsing per page), OCR the rendered ones in
+        # ONE Surya call (8 images -> 8 llama slots). If the whole batch overruns
+        # its watchdog timeout, retry page-by-page to isolate the stuck one. A
+        # crash loses at most the current batch; prior batches are saved.
         batch_idx = 0
         for start in range(0, len(todo), BATCH_SIZE):
             batch_idx += 1
             batch_start = time.monotonic()
             batch_nums = todo[start:start + BATCH_SIZE]
-            rendered = await asyncio.gather(*[render_one(p) for p in batch_nums])
+            rendered = await loop.run_in_executor(
+                None, pdf_utils.render_pages, source_pdf, batch_nums, jdir
+            )
 
             ok = [(pn, img) for pn, img in rendered if img is not None]
             failed = [pn for pn, img in rendered if img is None]

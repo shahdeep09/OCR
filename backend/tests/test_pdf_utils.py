@@ -19,6 +19,17 @@ def test_render_page_creates_png(sample_pdf, tmp_path):
     assert img.size[0] > 0 and img.size[1] > 0
 
 
+def test_render_pages_batch(sample_pdf, tmp_path):
+    """The fast pypdfium2 batch renderer produces a PNG + image per page."""
+    job_dir = tmp_path / "job"
+    rendered = pdf_utils.render_pages(sample_pdf, [1], job_dir)
+    assert len(rendered) == 1
+    page_num, img = rendered[0]
+    assert page_num == 1
+    assert img is not None and img.size[0] > 0
+    assert pdf_utils.page_image_path(job_dir, 1).exists()
+
+
 def test_build_searchable_pdf_embeds_text(sample_pdf, tmp_path):
     out = tmp_path / "searchable.pdf"
     pages_data = [

@@ -116,6 +116,58 @@ def page_image_path(job_dir: Path, page_num: int) -> Path:
     return job_dir / "images" / f"page_{page_num:04d}.png"
 
 
+def render_pages(
+    pdf_path: Path, page_nums: list[int], job_dir: Path
+) -> list[tuple[int, "Image.Image | None"]]:
+    """Render several 1-indexed pages, opening the PDF ONCE.
+
+    Uses pypdfium2 (in-process, parses the file once) which is dramatically
+    faster than pdf2image/poppler — poppler re-parses the whole PDF on every
+    single page, which on a large file costs ~10s/page of pure overhead.
+
+    Returns ``[(page_num, PIL.Image or None)]`` in the given order; ``None``
+    marks a page that could not be rendered (corrupt/oversized) so the caller
+    can record it and move on. Falls back to per-page pdf2image if pypdfium2 is
+    unavailable.
+    """
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:
+        out: list[tuple[int, Image.Image | None]] = []
+        for pn in page_nums:
+            try:
+                out.append((pn, render_page(pdf_path, pn, page_image_path(job_dir, pn))))
+            except Exception as e:
+                log.error("render failed for page %d: %s", pn, e)
+                out.append((pn, None))
+        return out
+
+    results: list[tuple[int, Image.Image | None]] = []
+    scale = RENDER_DPI / 72.0
+    doc = pdfium.PdfDocument(str(pdf_path))
+    try:
+        for pn in page_nums:
+            try:
+                page = doc[pn - 1]
+                bitmap = page.render(scale=scale)
+                img = bitmap.to_pil().convert("RGB")  # independent copy
+                bitmap.close()
+                page.close()
+                if img.width > MAX_IMAGE_WIDTH:
+                    ratio = MAX_IMAGE_WIDTH / img.width
+                    img = img.resize((MAX_IMAGE_WIDTH, int(img.height * ratio)), Image.LANCZOS)
+                out_path = page_image_path(job_dir, pn)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                img.save(out_path, format="PNG")
+                results.append((pn, img))
+            except Exception as e:
+                log.error("pypdfium2 render failed for page %d: %s", pn, e)
+                results.append((pn, None))
+    finally:
+        doc.close()
+    return results
+
+
 def build_searchable_pdf(
     source_pdf: Path,
     pages_data: list[dict[str, Any]],
