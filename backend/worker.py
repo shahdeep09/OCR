@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -228,7 +229,10 @@ async def _process_job(job_id: str) -> None:
         # call (8 images -> 8 llama slots). If the whole batch overruns its
         # watchdog timeout, retry page-by-page to isolate the stuck one. A crash
         # loses at most the current batch; prior batches are saved.
+        batch_idx = 0
         for start in range(0, len(todo), BATCH_SIZE):
+            batch_idx += 1
+            batch_start = time.monotonic()
             batch_nums = todo[start:start + BATCH_SIZE]
             rendered = await asyncio.gather(*[render_one(p) for p in batch_nums])
 
@@ -261,6 +265,15 @@ async def _process_job(job_id: str) -> None:
                 await save_page(page_num, "[page could not be rendered]", [])
 
             await broadcast_jobs()
+
+            elapsed = time.monotonic() - batch_start
+            n_pages = len(batch_nums)
+            done_now = done_count + start + n_pages
+            log.info(
+                "Job %s: batch %d/%d done — %d page(s) in %.1fs (%.1f s/page) | %d/%d total",
+                job_id, batch_idx, n_batches, n_pages, elapsed, elapsed / max(1, n_pages),
+                done_now, total,
+            )
 
         # Completeness guard: never report "done" with pages missing from the DB.
         final_done = len(db.list_pages(job_id))
