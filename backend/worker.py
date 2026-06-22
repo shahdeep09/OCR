@@ -33,9 +33,11 @@ log = logging.getLogger("bookscan.worker")
 
 OUTPUTS_DIR = Path(__file__).parent.parent / "outputs"
 
-# Pages processed concurrently per job. Matches llama-server's --parallel slots
-# (Surya default = 8) so the GPU stays fed. Override via BOOKSCAN_PARALLEL_PAGES.
-PARALLEL_PAGES = max(1, int(os.environ.get("BOOKSCAN_PARALLEL_PAGES", "8")))
+# Pages OCR'd together in one Surya call. Matches llama-server's --parallel
+# slots (Surya default = 8) so the GPU is fed a full batch at once — the batched
+# call is markedly faster than firing single-image calls concurrently. Override
+# via BOOKSCAN_BATCH_SIZE.
+BATCH_SIZE = max(1, int(os.environ.get("BOOKSCAN_BATCH_SIZE", "8")))
 
 
 _queue: asyncio.Queue[str] = asyncio.Queue()
@@ -166,35 +168,39 @@ async def _process_job(job_id: str) -> None:
             await broadcast_jobs()
             return
 
+        n_batches = (len(todo) + BATCH_SIZE - 1) // BATCH_SIZE
         log.info(
-            "Job %s: %d/%d already done, processing %d remaining (concurrency=%d)",
-            job_id, done_count, total, len(todo), PARALLEL_PAGES,
+            "Job %s: %d/%d already done, OCR'ing %d remaining in %d batch(es) of %d",
+            job_id, done_count, total, len(todo), n_batches, BATCH_SIZE,
         )
 
         langs = [s for s in (job["languages"] or "").split(",") if s] or ocr_engine.DEFAULT_LANGS
 
         loop = asyncio.get_running_loop()
-        sem = asyncio.Semaphore(PARALLEL_PAGES)
 
-        async def process_one(page_num: int) -> int:
-            async with sem:
-                img_path = pdf_utils.page_image_path(jdir, page_num)
-                img = await loop.run_in_executor(
-                    None, pdf_utils.render_page, source_pdf, page_num, img_path
-                )
-                result = await loop.run_in_executor(
-                    None, ocr_engine.run_page, img, langs
-                )
+        async def render_one(page_num: int):
+            img_path = pdf_utils.page_image_path(jdir, page_num)
+            img = await loop.run_in_executor(
+                None, pdf_utils.render_page, source_pdf, page_num, img_path
+            )
+            return page_num, img
+
+        # Process the remaining pages in batches of BATCH_SIZE. Each batch:
+        # render its pages (concurrently), OCR all of them in ONE Surya call
+        # (8 images -> 8 llama slots), then persist + broadcast per page. A
+        # crash loses at most the current batch; everything before it is saved.
+        for start in range(0, len(todo), BATCH_SIZE):
+            batch_nums = todo[start:start + BATCH_SIZE]
+            rendered = await asyncio.gather(*[render_one(p) for p in batch_nums])
+            page_nums = [pn for pn, _ in rendered]
+            images = [img for _, img in rendered]
+
+            results = await loop.run_in_executor(
+                None, ocr_engine.run_batch, images, [langs] * len(images)
+            )
+
+            for page_num, result in zip(page_nums, results):
                 db.upsert_page(job_id, page_num, result["text"], result["lines"])
-                return page_num
-
-        tasks = [
-            asyncio.create_task(process_one(p), name=f"job-{job_id[:8]}-page-{p}")
-            for p in todo
-        ]
-        try:
-            for fut in asyncio.as_completed(tasks):
-                await fut  # page_num (and any exception) surfaces here
                 processed = db.bump_processed(job_id)
                 await _broadcast(
                     job_id,
@@ -204,13 +210,7 @@ async def _process_job(job_id: str) -> None:
                         "total_pages": total,
                     },
                 )
-                await broadcast_jobs()
-        except BaseException:
-            for t in tasks:
-                if not t.done():
-                    t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            raise
+            await broadcast_jobs()
 
         db.set_status(job_id, "done")
         await _broadcast(
@@ -226,7 +226,7 @@ async def _process_job(job_id: str) -> None:
 
 
 async def worker_loop() -> None:
-    log.info("Worker loop started (parallel pages = %d)", PARALLEL_PAGES)
+    log.info("Worker loop started (batch size = %d)", BATCH_SIZE)
     while True:
         job_id = await _queue.get()
         try:
