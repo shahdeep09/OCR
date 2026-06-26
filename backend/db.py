@@ -213,3 +213,41 @@ def requeue_interrupted_jobs() -> None:
     """
     with _lock:
         _db.execute("UPDATE jobs SET status='queued', error=NULL WHERE status='running'")
+
+
+def job_count() -> int:
+    """Number of jobs in the DB. Used to skip backing up an empty database."""
+    with _lock:
+        return int(_db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0])
+
+
+def checkpoint() -> None:
+    """Fold the WAL into the main jobs.db file so committed data lands in the
+    file itself, not just the -wal sidecar. Cheap insurance against WAL loss."""
+    with _lock:
+        try:
+            _db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except sqlite3.Error:
+            pass
+
+
+def snapshot_to(dest_path: Path) -> None:
+    """Write a CONSISTENT copy of the live DB to ``dest_path`` via SQLite's online
+    backup API — safe to call while the app is reading/writing. Holding ``_lock``
+    makes it atomic with respect to our own writes."""
+    with _lock:
+        dest = sqlite3.connect(str(dest_path))
+        try:
+            _db.backup(dest)
+        finally:
+            dest.close()
+
+
+def close() -> None:
+    """Close the module connection (used by the restore CLI before overwriting
+    the DB file). The next call that needs the DB must reconnect."""
+    with _lock:
+        try:
+            _db.close()
+        except Exception:
+            pass

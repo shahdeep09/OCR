@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, Response
 from starlette.requests import ClientDisconnect
 
 import db
+import db_backup
 import ocr_engine
 import pdf_utils
 import proofread
@@ -58,6 +59,7 @@ async def lifespan(app: FastAPI):
     global _model_load_future
     db.init()
     db.requeue_interrupted_jobs()  # resume any batch a restart/crash left mid-flight
+    db_backup.startup_check()      # snapshot now if we have data; warn loudly if wiped
     worker.OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(UPLOAD_TMP, ignore_errors=True)  # drop any half-finished chunked uploads
     config.INBOX_DIR.mkdir(parents=True, exist_ok=True)
@@ -67,11 +69,18 @@ async def lifespan(app: FastAPI):
     _model_load_future.add_done_callback(_on_models_loaded)
 
     task = asyncio.create_task(worker.worker_loop())
+    backup_task = asyncio.create_task(db_backup.backup_loop())
     await worker.resume_queued_jobs()
     try:
         yield
     finally:
         task.cancel()
+        backup_task.cancel()
+        try:
+            db.checkpoint()
+            db_backup.snapshot("shutdown")
+        except Exception:
+            log.warning("Shutdown DB snapshot failed", exc_info=True)
 
 
 app = FastAPI(title="BookScan", lifespan=lifespan)

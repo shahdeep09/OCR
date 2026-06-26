@@ -9,10 +9,13 @@ from __future__ import annotations
 from db import (  # noqa: F401  (re-exports)
     DB_PATH,
     bump_processed,
+    checkpoint,
+    close,
     create_job,
     delete_job,
     get_job,
     init,
+    job_count,
     list_jobs,
     list_pages,
     list_pages_with_bboxes,
@@ -21,6 +24,7 @@ from db import (  # noqa: F401  (re-exports)
     reset_running_to_failed,
     set_status,
     set_total_pages,
+    snapshot_to,
     update_page_text,
     upsert_page,
 )
