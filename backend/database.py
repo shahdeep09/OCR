@@ -17,6 +17,7 @@ from db import (  # noqa: F401  (re-exports)
     list_pages,
     list_pages_with_bboxes,
     now,
+    requeue_interrupted_jobs,
     reset_running_to_failed,
     set_status,
     set_total_pages,

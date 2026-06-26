@@ -72,3 +72,16 @@ def test_reset_running_to_failed(tmp_db):
     assert "restart" in (j1["error"] or "").lower()
     # j2 was 'queued', which we also reset (workers re-pick up via resume_queued_jobs).
     assert j2["status"] == "failed"
+
+
+def test_requeue_interrupted_jobs(tmp_db):
+    """A restart auto-resumes interrupted work: 'running' -> 'queued', while a job
+    already 'queued' is left alone (resume_queued_jobs re-enqueues it)."""
+    tmp_db.create_job("j1", "a.pdf", ["en"])      # stays queued
+    tmp_db.create_job("j2", "b.pdf", ["en"])
+    tmp_db.set_status("j2", "running")            # interrupted mid-run
+    tmp_db.requeue_interrupted_jobs()
+    assert tmp_db.get_job("j1")["status"] == "queued"
+    j2 = tmp_db.get_job("j2")
+    assert j2["status"] == "queued"
+    assert j2["error"] is None

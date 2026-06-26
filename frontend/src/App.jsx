@@ -5,6 +5,7 @@ import Uploader from './components/Uploader.jsx'
 import ProgressPanel from './components/ProgressPanel.jsx'
 import Viewer from './components/Viewer.jsx'
 import ErrorCard from './components/ErrorCard.jsx'
+import ProofreadPanel from './components/ProofreadPanel.jsx'
 
 const POLL_MS = 3000
 const RECONNECT_MAX_MS = 5000
@@ -119,7 +120,14 @@ export default function App() {
         onNew={() => setSelectedId(null)}
       />
       <main className="main">
-        {!selectedJob && <div className="main-empty"><Uploader onUploaded={onUploaded} /></div>}
+        {!selectedJob && (
+          <div className="main-empty">
+            <div className="empty-stack">
+              <Uploader onUploaded={onUploaded} />
+              <ProofreadPanel />
+            </div>
+          </div>
+        )}
         {selectedJob && selectedJob.status === 'failed' && (
           <div className="main-progress"><ErrorCard job={selectedJob} onResume={refreshJobs} /></div>
         )}

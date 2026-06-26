@@ -49,3 +49,8 @@ class UploadFinish(BaseModel):
 class InboxItem(BaseModel):
     filename: str
     size_mb: float
+
+
+class ProofreadZipRequest(BaseModel):
+    # Report CSV names to bundle; empty list = all reports from the last run.
+    names: list[str] = []

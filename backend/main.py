@@ -6,10 +6,12 @@ config.init_env()
 config.init_logging()
 
 import asyncio
+import io
 import json
 import logging
 import shutil
 import uuid
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -21,12 +23,14 @@ from starlette.requests import ClientDisconnect
 import db
 import ocr_engine
 import pdf_utils
+import proofread
 import worker
 from schemas import (
     IngestRequest,
     InboxItem,
     PageOut,
     PageUpdate,
+    ProofreadZipRequest,
     UploadFinish,
     UploadInit,
     UploadItem,
@@ -53,7 +57,7 @@ def _on_models_loaded(fut: asyncio.Future) -> None:
 async def lifespan(app: FastAPI):
     global _model_load_future
     db.init()
-    db.reset_running_to_failed()
+    db.requeue_interrupted_jobs()  # resume any batch a restart/crash left mid-flight
     worker.OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(UPLOAD_TMP, ignore_errors=True)  # drop any half-finished chunked uploads
     config.INBOX_DIR.mkdir(parents=True, exist_ok=True)
@@ -373,6 +377,97 @@ def download_pdf(job_id: str):
         pdf_utils.build_searchable_pdf(jdir / "source.pdf", pages, out)
     fname = Path(job["filename"]).stem + ".searchable.pdf"
     return FileResponse(out, media_type="application/pdf", filename=fname)
+
+
+# ---------- Proofreading reports ----------
+# On-demand quality triage. Scores every page of every book from the OCR text
+# (Surya's VLM gives no real confidence — see proofread.py) and writes one CSV
+# per book, worst pages first. Pure text analysis over the DB: fast, read-only,
+# never touches the OCR pipeline — safe to run any time.
+
+REPORTS_DIR = config.OUTPUTS_DIR / "_reports"
+
+
+def _safe_report(name: str) -> Path:
+    """Resolve a report name to a path inside REPORTS_DIR, or 404. Guards against
+    path traversal (``..`` / absolute paths) by only accepting a bare filename."""
+    safe = Path(name).name
+    p = REPORTS_DIR / safe
+    if safe.endswith(".csv") and p.is_file() and p.resolve().parent == REPORTS_DIR.resolve():
+        return p
+    raise HTTPException(404, "Report not found")
+
+
+@app.post("/api/proofread/run")
+def proofread_run(min_confidence: int = 80):
+    min_confidence = max(0, min(100, min_confidence))
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    for old in REPORTS_DIR.glob("*.csv"):       # clear last run so the list is current
+        old.unlink(missing_ok=True)
+
+    result = proofread.analyze(db.DB_PATH, min_confidence)
+    reports = []
+    for book in result["books"]:
+        name = proofread.write_book_csv(book, REPORTS_DIR)
+        reports.append({
+            "csv_name": name,
+            "filename": book["filename"],
+            "job_id": book["job_id"],
+            "total_pages": book["total_pages"],
+            "flagged": book["flagged"],
+        })
+
+    index = {
+        "generated_at": db.now(),
+        "native_confidence": result["native"],
+        "min_confidence": min_confidence,
+        "reports": reports,
+    }
+    (REPORTS_DIR / "index.json").write_text(
+        json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return index
+
+
+@app.get("/api/proofread/reports")
+def proofread_reports():
+    """The most recent run's report list (lets the UI show last results without
+    re-running)."""
+    idx = REPORTS_DIR / "index.json"
+    if idx.exists():
+        try:
+            return json.loads(idx.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"generated_at": None, "native_confidence": False, "min_confidence": 80, "reports": []}
+
+
+@app.get("/api/proofread/reports/{name}/download")
+def proofread_download_one(name: str):
+    p = _safe_report(name)
+    return FileResponse(p, media_type="text/csv", filename=p.name)
+
+
+@app.post("/api/proofread/download-zip")
+def proofread_download_zip(payload: ProofreadZipRequest):
+    """Bundle selected report CSVs (or all, if no names given) into a zip."""
+    if payload.names:
+        paths = [_safe_report(n) for n in payload.names]
+    else:
+        paths = sorted(REPORTS_DIR.glob("*.csv")) if REPORTS_DIR.exists() else []
+    if not paths:
+        raise HTTPException(400, "No reports to download — run the analysis first")
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for p in paths:
+            z.write(p, arcname=p.name)
+    buf.seek(0)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="bookscan-proofread.zip"'},
+    )
 
 
 # ---------- WebSockets ----------

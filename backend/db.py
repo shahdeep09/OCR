@@ -188,9 +188,28 @@ def delete_job(job_id: str) -> bool:
 
 
 def reset_running_to_failed() -> None:
-    """On startup, mark any 'running' jobs as failed (worker died mid-job)."""
+    """Mark any in-flight ('running'/'queued') jobs as failed.
+
+    Kept for the deployment spec + tests. The app no longer calls this on
+    startup — it uses :func:`requeue_interrupted_jobs` so a restart auto-resumes
+    the batch instead of stranding it behind manual 'Resume' clicks.
+    """
     with _lock:
         _db.execute(
             "UPDATE jobs SET status='failed', error='Backend restarted mid-job', completed_at=? WHERE status IN ('running','queued')",
             (now(),),
         )
+
+
+def requeue_interrupted_jobs() -> None:
+    """On startup, resume a batch that a restart or crash interrupted.
+
+    A job whose process died mid-run is left as 'running' (no clean shutdown).
+    Flip those back to 'queued' so the worker re-picks them up and continues from
+    the pages already saved — the batch resumes itself instead of stranding every
+    in-flight book. Jobs already 'queued' are left as-is (``resume_queued_jobs``
+    enqueues them next). Genuinely 'failed' jobs are NOT touched; only an
+    interrupted in-flight job is auto-resumed.
+    """
+    with _lock:
+        _db.execute("UPDATE jobs SET status='queued', error=NULL WHERE status='running'")

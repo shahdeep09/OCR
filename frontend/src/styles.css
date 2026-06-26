@@ -171,12 +171,30 @@ button.danger:hover { background: #fff5f5; }
   flex-direction: column;
   overflow: hidden;
 }
-.main-empty, .main-progress {
+.main-progress {
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 24px;
+}
+/* Home screen: top-aligned + scrollable so the uploader + proofread cards
+   stack without clipping when the report table grows. */
+.main-empty {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  overflow-y: auto;
+  padding: 24px;
+}
+.empty-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  width: 480px;
+  max-width: 100%;
 }
 .card {
   background: var(--surface);
@@ -283,6 +301,46 @@ button.danger:hover { background: #fff5f5; }
   border-radius: 4px;
   font-size: 12px;
 }
+
+/* ===== Proofread panel ===== */
+.proofread { width: 100%; text-align: left; }
+.proofread h2 { margin: 0 0 8px; font-size: 18px; }
+.proofread > p { color: var(--text-muted); margin: 0 0 14px; font-size: 13px; }
+.proofread-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+.proofread-controls select {
+  font: inherit;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+}
+.proofread .error { margin-top: 10px; color: var(--danger); font-size: 13px; }
+.proofread-summary { margin: 8px 0 6px; }
+.proofread-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.proofread-table th, .proofread-table td {
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.proofread-table th { color: var(--text-muted); font-weight: 600; font-size: 12px; }
+.proofread-table td:first-child, .proofread-table th:first-child { width: 24px; }
+.proofread-table .pf-name {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.proofread-table .pf-flagged { color: var(--danger); font-weight: 600; }
+.proofread-table td a { color: var(--accent); text-decoration: none; }
+.proofread-table td a:hover { text-decoration: underline; }
+.proofread-actions { display: flex; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
 
 /* ===== Progress ===== */
 .progress-card { width: 420px; text-align: center; }

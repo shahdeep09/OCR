@@ -118,6 +118,26 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ filename }),
     }),
+  // ---- Proofreading reports ----
+  runProofread: (minConfidence = 80) =>
+    jfetch(`/api/proofread/run?min_confidence=${minConfidence}`, { method: 'POST' }),
+  getProofreadReports: () => jfetch('/api/proofread/reports'),
+  proofreadCsvUrl: (name) =>
+    `${API_BASE}/api/proofread/reports/${encodeURIComponent(name)}/download`,
+  // Selected report CSVs (or all, if names is empty) as a zip Blob.
+  proofreadZip: async (names) => {
+    const r = await fetch(`${API_BASE}/api/proofread/download-zip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ names: names || [] }),
+    })
+    if (!r.ok) {
+      let msg = `${r.status} ${r.statusText}`
+      try { const b = await r.json(); if (b.detail) msg = b.detail } catch {}
+      throw new Error(msg)
+    }
+    return r.blob()
+  },
   pageImageUrl: (id, page) => `${API_BASE}/api/jobs/${id}/pages/${page}/image`,
   downloadUrl: (id, kind) => `${API_BASE}/api/jobs/${id}/download/${kind}`,
   wsProgress: (id) => new WebSocket(`${WS_BASE}/api/ws/progress/${id}`),
