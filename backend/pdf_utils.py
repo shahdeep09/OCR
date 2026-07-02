@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import io
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +115,22 @@ def render_page(pdf_path: Path, page_num: int, out_path: Path) -> Image.Image:
 
 def page_image_path(job_dir: Path, page_num: int) -> Path:
     return job_dir / "images" / f"page_{page_num:04d}.png"
+
+
+# Pages with essentially no ink send the OCR VLM into decoder loops. Flag them so
+# the worker can skip OCR and save them empty. Tunable via env; default 0.001 =
+# 0.1% dark pixels — a real text page is ~2-10%, so only genuinely blank pages
+# qualify (a page with even a line of text stays well above this).
+BLANK_INK_THRESHOLD = float(os.environ.get("BOOKSCAN_BLANK_INK_THRESHOLD", "0.001"))
+
+
+def is_blank_image(image: Image.Image, threshold: float = BLANK_INK_THRESHOLD) -> bool:
+    """True if ``image`` is essentially blank (dark-pixel fraction < threshold)."""
+    gray = image.convert("L")
+    hist = gray.histogram()
+    dark = sum(hist[:96])                  # pixels darker than page background
+    total = gray.size[0] * gray.size[1]
+    return total > 0 and (dark / total) < threshold
 
 
 def render_pages(

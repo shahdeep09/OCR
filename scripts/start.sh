@@ -48,6 +48,12 @@ source .venv/bin/activate
 # shellcheck source=/dev/null
 source /workspace/llamacpp/env.sh
 
+# OCR loop guards (DEE-77): cap VLM generation + bound loopy pages so one bad
+# page can't hang the book. A manual `export` before running this still wins.
+export SURYA_MAX_TOKENS_FULL_PAGE="${SURYA_MAX_TOKENS_FULL_PAGE:-1536}"
+export BOOKSCAN_PAGE_TIMEOUT="${BOOKSCAN_PAGE_TIMEOUT:-60}"
+export BOOKSCAN_BATCH_TIMEOUT="${BOOKSCAN_BATCH_TIMEOUT:-150}"
+
 echo "==> Starting uvicorn DETACHED (survives terminal/internet drop)..."
 # setsid → new session (no controlling terminal); nohup → ignore SIGHUP;
 # </dev/null → no stdin tie; & → background.

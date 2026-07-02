@@ -3,8 +3,17 @@ uvicorn[standard]>=0.27
 python-multipart>=0.0.9
 websockets>=12.0
 pydantic>=2.6
-surya-ocr>=0.6.0
+
+# --- OCR engine: PINNED (DEE-77) ---
+# A loose `surya-ocr>=0.6.0` let a pod rebuild silently change the stack, which
+# regressed OCR into decoder loops (~10 min/page). Pin the exact working stack.
+# For a full reproducible lock, run `pip freeze > requirements.lock` on the pod.
+surya-ocr==0.20.0
+torch==2.12.0
+transformers==4.57.6
+tokenizers==0.22.2
+
 pdf2image>=1.17
-Pillow>=10.2
+Pillow==10.4.0
 pikepdf>=8.13
 reportlab>=4.1

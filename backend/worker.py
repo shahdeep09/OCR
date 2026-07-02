@@ -32,6 +32,13 @@ import pdf_utils
 
 log = logging.getLogger("bookscan.worker")
 
+
+class JobGone(Exception):
+    """Raised when a job's DB row disappears mid-run (book deleted from the UI
+    while it was OCR'ing). The worker then stops that job cleanly instead of
+    crashing on the resulting FOREIGN KEY violation."""
+
+
 OUTPUTS_DIR = Path(__file__).parent.parent / "outputs"
 
 # Pages OCR'd together in one Surya call. Matches llama-server's --parallel
@@ -188,7 +195,14 @@ async def _process_job(job_id: str) -> None:
         loop = asyncio.get_running_loop()
 
         async def save_page(page_num: int, text: str, lines: list) -> None:
-            db.upsert_page(job_id, page_num, text, lines)
+            try:
+                db.upsert_page(job_id, page_num, text, lines)
+            except Exception:
+                # Job row gone (book deleted from the UI mid-run) → FK violation.
+                # Stop this job cleanly instead of crash-looping on every page.
+                if db.get_job(job_id) is None:
+                    raise JobGone(job_id)
+                raise
             processed = db.bump_processed(job_id)
             await _broadcast(
                 job_id,
@@ -227,6 +241,17 @@ async def _process_job(job_id: str) -> None:
 
             ok = [(pn, img) for pn, img in rendered if img is not None]
             failed = [pn for pn, img in rendered if img is None]
+
+            # Blank pages have nothing to read and send the VLM into decoder
+            # loops (the #1 cause of 10-min pages). Save them empty and never OCR
+            # them. Conservative ink threshold, so real text pages are untouched.
+            blank_nums = {pn for pn, img in ok if pdf_utils.is_blank_image(img)}
+            if blank_nums:
+                log.info("Job %s: skipping %d blank page(s): %s",
+                         job_id, len(blank_nums), sorted(blank_nums))
+                for pn in sorted(blank_nums):
+                    await save_page(pn, "", [])
+                ok = [(pn, img) for pn, img in ok if pn not in blank_nums]
 
             if ok:
                 ok_nums = [pn for pn, _ in ok]
@@ -275,6 +300,9 @@ async def _process_job(job_id: str) -> None:
         await _broadcast(
             job_id, {"status": "done", "processed_pages": total, "total_pages": total}
         )
+        await broadcast_jobs()
+    except JobGone:
+        log.info("Job %s was deleted mid-run — stopping cleanly.", job_id)
         await broadcast_jobs()
     except Exception as e:
         tb = traceback.format_exc()
