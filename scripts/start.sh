@@ -48,11 +48,24 @@ source .venv/bin/activate
 # shellcheck source=/dev/null
 source /workspace/llamacpp/env.sh
 
-# OCR loop guards (DEE-77): cap VLM generation + bound loopy pages so one bad
-# page can't hang the book. A manual `export` before running this still wins.
-export SURYA_MAX_TOKENS_FULL_PAGE="${SURYA_MAX_TOKENS_FULL_PAGE:-1536}"
-export BOOKSCAN_PAGE_TIMEOUT="${BOOKSCAN_PAGE_TIMEOUT:-60}"
-export BOOKSCAN_BATCH_TIMEOUT="${BOOKSCAN_BATCH_TIMEOUT:-150}"
+# OCR loop guards. Loops are now caught by the blank-page skip (pdf_utils
+# .is_blank_image — blanks were the #1 trigger) plus Surya's own decoder-loop
+# detection, so these caps only need to be a backstop. They were briefly much
+# tighter (1536 tokens / 60s / 150s), which truncated dense pages mid-word — the
+# generation stopped before the page ended. Sized so a legitimately dense page
+# finishes, while a runaway page is still bounded.
+#
+#   MAX_TOKENS 6144 : fits a ~1000+ word page. Must stay within the per-slot KV
+#     budget (~2k image prefill + generation + ~2k overhead < 12288 =
+#     SURYA_INFERENCE_CTX_PER_SLOT) or llama-server truncates silently anyway.
+#     Still half of Surya's 12288 default, so a true loop is capped.
+#   TIMEOUTs        : a dense page generates for ~150-200s, so the batch needs
+#     room to finish normally instead of falling into per-page isolation.
+#
+# All three are env-tunable — a manual `export` before running this still wins.
+export SURYA_MAX_TOKENS_FULL_PAGE="${SURYA_MAX_TOKENS_FULL_PAGE:-6144}"
+export BOOKSCAN_PAGE_TIMEOUT="${BOOKSCAN_PAGE_TIMEOUT:-150}"
+export BOOKSCAN_BATCH_TIMEOUT="${BOOKSCAN_BATCH_TIMEOUT:-300}"
 
 echo "==> Starting uvicorn DETACHED (survives terminal/internet drop)..."
 # setsid → new session (no controlling terminal); nohup → ignore SIGHUP;
